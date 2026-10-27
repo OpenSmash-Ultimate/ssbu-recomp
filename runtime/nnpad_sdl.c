@@ -38,6 +38,7 @@ typedef struct {
     char ignore[16][40]; int nignore;   /* [general] ignore = <GUID>: devices that are never used */
     int kb_player;                      /* -2 auto, -1 none, 0..7 */
     int kb_vk[24];
+    int kb_move;                        /* [keyboard] movement = ssf2: 1 (nnhid.c kb_ssf2); default full: 0 */
     int gc_pro;                         /* [general] gamecube_style = pro: GameCube controllers reach the game as Pro Controllers (default: native) */
 } Cfg;
 typedef struct {
@@ -167,6 +168,11 @@ static const char *const g_default_ini =
 "; Keys: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12, NUM0..NUM9, or 0x<virtual key code>; none = unbound.\r\n"
 "A = Z\r\nB = X\r\nX = C\r\nY = V\r\nL = Q\r\nR = E\r\nZL = A\r\nZR = S\r\nPLUS = ENTER\r\nMINUS = BACKSPACE\r\n"
 "STICK_L = none\r\nSTICK_R = none\r\nLEFT = J\r\nUP = I\r\nRIGHT = L\r\nDOWN = K\r\n"
+"; movement = full: a stick key pushes the stick fully, as a button does. movement = ssf2: the left stick keys as in Super\r\n"
+";   Smash Flash 2: a key walks, the same key again within 200 ms runs, down crouches, down twice drops through a platform,\r\n"
+";   a key and A within about 130 ms is a smash attack, up and A or B within 4 frames is an up smash / up special (BUILDING.md).\r\n"
+"; The environment variable SSBU_KEYBOARD_MOVEMENT (full | ssf2) overrides this line.\r\n"
+"movement = full\r\n"
 "LSTICK_LEFT = LEFT\r\nLSTICK_UP = UP\r\nLSTICK_RIGHT = RIGHT\r\nLSTICK_DOWN = DOWN\r\n"
 "RSTICK_LEFT = none\r\nRSTICK_UP = none\r\nRSTICK_RIGHT = none\r\nRSTICK_DOWN = none\r\n"
 "\r\n"
@@ -293,6 +299,7 @@ static void cfg_parse(Cfg *c, char *text) {
             if (!_stricmp(val, "none")) c->pnone[p] = 1; else if (_stricmp(val, "auto")) snprintf(c->pguid[p], sizeof c->pguid[0], "%s", val);
         } else if (sect == 3) {
             if (!_stricmp(key, "player")) c->kb_player = !_stricmp(val, "auto") ? -2 : !_stricmp(val, "none") ? -1 : atoi(val) >= 1 && atoi(val) <= 8 ? atoi(val) - 1 : -2;
+            else if (!_stricmp(key, "movement")) c->kb_move = !_stricmp(val, "ssf2");
             else for (int i = 0; i < 24; i++) if (!_stricmp(key, g_kbn[i])) c->kb_vk[i] = parse_vk(val);
         }
     }
@@ -788,6 +795,14 @@ int nnpad_keyboard_player(void) {
     r = g_kb_slot;
     unlock();
     return r;
+}
+/* [keyboard] movement: 1 = ssf2 (nnhid.c kb_ssf2), 0 = full; SSBU_KEYBOARD_MOVEMENT=ssf2|full overrides the file (tests) */
+int nnpad_kb_movement(void) {          /* once per poll of the keyboard's player: the variable is read once */
+    static int env = -2;
+    if (env == -2) { const char *e = getenv("SSBU_KEYBOARD_MOVEMENT"); env = e && e[0] ? !_stricmp(e, "ssf2") : -1; }
+    if (env >= 0) return env;
+    nnpad_kb_vk(0);
+    return g_cfg.kb_move;
 }
 int nnpad_kb_vk(int idx) {
     if (!g_inited) { lock(); if (!g_cfg.path[0]) { cfg_load(1); } unlock(); }
@@ -1352,6 +1367,18 @@ int nnpad_selftest(const NnHidHooks *h) {
         SDL_CloseJoystick(rj); SDL_DetachVirtualJoystick(rid);
     }
 
+    /* ---- [keyboard] movement = ssf2 (nnhid.c kb_ssf2): read from the file, and kept when the settings menu writes the section */
+    {
+        Sleep(1100); write_text(path, "[keyboard]\r\nplayer = none\r\nmovement = ssf2\r\n"); Sleep(1100); nnpad_poll(1);
+        int on = nnpad_kb_movement();
+        nnpad_kb_bind(0, nnpad_kb_vk(0));                    /* what the Controls page does: the whole [keyboard] section written again */
+        size_t n = 0; char *t = read_file(path, &n);
+        check(on == 1 && t && strstr(t, "movement = ssf2"), "[keyboard] movement = ssf2 is read, and kept when the settings menu writes the section");
+        free(t);
+        Sleep(1100); write_text(path, "[keyboard]\r\nplayer = none\r\n"); Sleep(1100); nnpad_poll(1);
+        check(nnpad_kb_movement() == 0, "[keyboard] without a movement line: full (a stick key pushes fully)");
+    }
+
     /* ---- clean up */
     for (int i = 0; i < 8; i++) { if (id[i] && js[i]) { SDL_CloseJoystick(js[i]); SDL_DetachVirtualJoystick(id[i]); } }
     settle();
@@ -1387,6 +1414,7 @@ static void kb_write(void) {                          /* lock held */
     int o = snprintf(body, sizeof body, "; written by the settings menu (F1); key names: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12 NUM0..NUM9, 0x.. or none\r\n");
     o += snprintf(body + o, sizeof body - (size_t)o, "player = %s\r\n", g_cfg.kb_player == -2 ? "auto" : g_cfg.kb_player == -1 ? "none" : (snprintf(nm, sizeof nm, "%d", g_cfg.kb_player + 1), nm));
     for (int i = 0; i < 24 && o < (int)sizeof body - 64; i++) { nnpad_vk_name(g_cfg.kb_vk[i], nm, sizeof nm); o += snprintf(body + o, sizeof body - (size_t)o, "%s = %s\r\n", g_kbn[i], nm); }
+    o += snprintf(body + o, sizeof body - (size_t)o, "movement = %s\r\n", g_cfg.kb_move ? "ssf2" : "full");      /* kept: the menu does not show it */
     ini_replace_section(g_cfg.path, "[keyboard]", body);
     g_cfg.mtime = file_mtime(g_cfg.path);             /* what is in memory is what was written: no reload needed */
     say("nn::pad: [keyboard] of %s written (settings menu)\n", g_cfg.path);

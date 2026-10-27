@@ -105,12 +105,14 @@ static int script_key(int vk) {
  *                     input_mark(<mark>) has been raised, e.g. the room host's L + R until the mark setup-2p (debug_mode.c): the room's match is set up
  *   <n>               wait n polls
  *   <n>:<keys>[/<h>]  wait n polls, then hold the keys for h polls (default 8); keys as in SSBU_SCRIPT
+ *   0:+<keys>[/<h>]   the keys from the poll the previous step's hold ended in: no poll without keys between the two
+ *                     (a key held across both steps stays down, e.g. "0:r/20 0:+rZ/4" = right, then A while right is held)
  * Example: "@movie 90:Z 120:Z @draws:150-200 300:u/40 10:Z". Each step is announced with the poll number and the
  * draw count of the last frame. tests\seq_battle.txt is the sequence from boot to a battle (tests\run_battle.sh). */
 #define SEQ_MAX 256
 #define MARK_MAX 128
 enum { SEQ_KEYS = 0, SEQ_MARK, SEQ_DRAWS, SEQ_UNTIL, SEQ_UNTILMARK };
-static struct { int wait, hold, kind, lo, hi, need; char keys[12]; char mark[40]; } g_seq[SEQ_MAX];
+static struct { int wait, hold, kind, lo, hi, need, join; char keys[12]; char mark[40]; } g_seq[SEQ_MAX];
 static int g_seq_count = -1, g_seq_index, g_seq_left, g_seq_holding, g_seq_run;
 static char g_marks[MARK_MAX][40];
 static volatile LONG g_mark_count, g_frame_draws_seen = -1;
@@ -168,6 +170,7 @@ static void seq_tick(void) {                              /* once per poll of pl
                 g_seq[g_seq_count].kind = SEQ_MARK;
                 strncpy(g_seq[g_seq_count].mark, tok + 1, sizeof g_seq[0].mark - 1);
             } else if (sscanf(tok, "%d:%11[^/]/%d", &g_seq[g_seq_count].wait, g_seq[g_seq_count].keys, &g_seq[g_seq_count].hold) < 1) { printf("input sequence: bad step %s\n", tok); break; }
+            else if (g_seq[g_seq_count].keys[0] == '+') { g_seq[g_seq_count].join = 1; memmove(g_seq[g_seq_count].keys, g_seq[g_seq_count].keys + 1, strlen(g_seq[g_seq_count].keys)); }
             g_seq_count++;
         }
         if (g_seq_count) printf("input sequence: %d steps\n", g_seq_count);
@@ -238,6 +241,11 @@ static void seq_tick(void) {                              /* once per poll of pl
         return;
     }
     seq_begin(g_seq_index + 1);                           /* the hold just ended */
+    if (g_seq_index < g_seq_count && g_seq[g_seq_index].kind == SEQ_KEYS && g_seq[g_seq_index].join && !g_seq_left && g_seq[g_seq_index].keys[0]) {
+        g_seq_holding = 1;                                /* 0:+<keys>: held from this poll on, no poll without keys in between */
+        g_seq_left = g_seq[g_seq_index].hold;
+        printf("input sequence: poll %lld step %d keys %s for %d, joined to the step before (%ld draws)\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].keys, g_seq[g_seq_index].hold, g_frame_draws_seen);
+    }
 }
 
 static int seq_key(int vk) {
@@ -575,6 +583,112 @@ static void fight_shot_poll(int ticks) {
     ff += ticks;
     if (ff >= list[next]) { printf("shot: fight frame %lld reached at poll %lld (wanted %d): the next queued present is saved\n", ff, (long long)g_seq_polls, list[next]); fflush(stdout); nvn_front_shot_fight(list[next]); next++; }
 }
+/* [keyboard] movement = ssf2 (controllers.ini; SSBU_KEYBOARD_MOVEMENT=ssf2 overrides it): the keys of the left stick read the
+ * way Super Smash Flash 2 (McLeodGaming, beta 1.4.0.1, a keyboard game) reads its direction keys. With movement = full a stick
+ * key pushes the stick fully in one poll, which the game takes as a flick: a key always dashes, down always drops through a
+ * platform, and walking, crouching on a platform and tilt attacks need an analog stick. SSF2's own rules (its Character.as:
+ * checkDoubleTap, the smash timer, the jump squat; it runs at 30 frames a second, so its frame counts are doubled here)
+ * decide when a key pushes part way and when fully:
+ *  - a horizontal key walks: `walk` for `walk_full` polls, then fully (full walking speed and air drift, still no dash);
+ *  - down crouches: `crouch`, which also fast-falls in the air but does not drop through a platform;
+ *  - the same key again within `dtap` polls of letting it go pushes fully: a dash, for down a drop through a platform;
+ *  - while a horizontal key pushes fully, or within `dance` polls of letting it go, the other one pushes fully too (dash
+ *    dance, run turnaround); a key pressed while the shield (ZL / ZR) is held pushes fully (roll, spot dodge);
+ *  - A within `smash_x` polls of a horizontal key (`smash_y` of down) is a smash attack: in the first `flick` polls of the key
+ *    the key pushes fully in the same poll (from `walk` / `crouch` the game still takes that as a flick); later the stick goes
+ *    back to the middle for that poll and A comes in the next one, with the full push (measured: from `walk` to full with A
+ *    3 polls after the key = smash, 6 polls after = tilt; back to `walk` for one poll before it = tilt as well);
+ *  - up: below (kb_ssf2).
+ * Measured with SSBU_FIGHT_HASH (status and motion of the fighter per frame; Mario on Battlefield, 13.0.4, one run per value;
+ * other fighters NOT measured, the thresholds are expected to be common to all): down at 0.60 / 0.62 / 0.63 / 0.64 does
+ * nothing; 0.65 / 0.655 / 0.66 crouch on a platform without dropping and fast-fall from the top of a jump; 0.67 and more drop
+ * through. A horizontal key at 0.75 / 0.8 walks, 0.85 / 0.9 / 0.95 dashes; 0.5 / 0.6 / 0.7 for 4 polls and then 1.0 walk
+ * (walk_slow .. walk_fast), no dash. The clock is this player's poll count: the game polls each player once a frame (SSBU_SEQ
+ * counts the same polls). */
+static struct { float walk, crouch; int walk_full, dtap, dance, smash_x, smash_y, flick, up_wait, up_keep; } g_kbt =
+    {0.60f, 0.655f, 4, 12, 12, 9, 7, 3, 4, 3};
+static void kb_tune(void) {         /* TEST ONLY: SSBU_KB_SSF2_TUNE="walk=0.6,crouch=0.655,walkfull=4,dtap=12,dance=12,smashx=9,..." */
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *e = getenv("SSBU_KB_SSF2_TUNE");
+    char k[16]; double v; int n;
+    while (e && sscanf(e, " %15[a-z_]=%lf%n", k, &v, &n) == 2) {
+        if (!strcmp(k, "walk")) g_kbt.walk = (float)v; else if (!strcmp(k, "crouch")) g_kbt.crouch = (float)v;
+        else if (!strcmp(k, "walkfull")) g_kbt.walk_full = (int)v; else if (!strcmp(k, "dtap")) g_kbt.dtap = (int)v;
+        else if (!strcmp(k, "dance")) g_kbt.dance = (int)v; else if (!strcmp(k, "smashx")) g_kbt.smash_x = (int)v;
+        else if (!strcmp(k, "smashy")) g_kbt.smash_y = (int)v; else if (!strcmp(k, "upwait")) g_kbt.up_wait = (int)v;
+        else if (!strcmp(k, "upkeep")) g_kbt.up_keep = (int)v; else if (!strcmp(k, "flick")) g_kbt.flick = (int)v;
+        e += n;
+        if (*e == ',') e++;
+    }
+    printf("nn::hid: keyboard movement ssf2: walk %.3f crouch %.3f walk_full %d dtap %d dance %d smash_x %d smash_y %d flick %d up_wait %d up_keep %d\n",
+           g_kbt.walk, g_kbt.crouch, g_kbt.walk_full, g_kbt.dtap, g_kbt.dance, g_kbt.smash_x, g_kbt.smash_y, g_kbt.flick, g_kbt.up_wait, g_kbt.up_keep);
+}
+typedef struct {
+    long long t;                    /* this player's polls */
+    int kx, ky;                     /* the keys' direction at the last poll: -1, 0, 1 */
+    int x_full, y_full;             /* the held horizontal / vertical key pushes fully */
+    long long x_at, y_at;           /* poll its key went down */
+    long long x_up[2], y_up[2];     /* poll a key was last let go: [0] left / down, [1] right / up */
+    long long run_up;               /* poll a horizontal key that pushed fully was let go */
+    int smash_a;                    /* A held back one poll for the flick of a smash attack: given in the next poll */
+    int up_pend;                    /* up is held back (up_wait) */
+    long long up_keep;              /* up stays pushed until this poll (a full hop through the jump squat) */
+    uint64_t prev;                  /* buttons at the last poll */
+} KbMove;
+static KbMove g_kbm[8];
+static void kb_ssf2(uint32_t id, uint64_t *buttons, int *lx, int *ly) {
+    KbMove *m = &g_kbm[id];
+    kb_tune();
+    long long t = ++m->t;
+    if (t == 1) m->x_up[0] = m->x_up[1] = m->y_up[0] = m->y_up[1] = m->run_up = -1000;
+    int kx = (*lx > 0) - (*lx < 0), ky = (*ly > 0) - (*ly < 0);
+    uint64_t pressed = *buttons & ~m->prev;
+    int shield = (*buttons & (1ull << BTN_ZL | 1ull << BTN_ZR)) != 0, attack = pressed >> BTN_A & 1, special = pressed >> BTN_B & 1;
+    m->prev = *buttons;
+    if (m->smash_a) { *buttons |= 1ull << BTN_A; m->smash_a = 0; }
+    if (kx != m->kx) {
+        if (m->kx) { m->x_up[m->kx > 0] = t; if (m->x_full) m->run_up = t; }
+        m->x_full = kx && (t - m->x_up[kx > 0] <= g_kbt.dtap || t - m->run_up <= g_kbt.dance || shield);
+        m->x_at = t;
+        m->kx = kx;
+    }
+    if (ky != m->ky) {
+        if (m->ky) m->y_up[m->ky > 0] = t;
+        m->y_full = ky < 0 && (t - m->y_up[0] <= g_kbt.dtap || shield);
+        if (ky > 0) m->up_pend = g_kbt.up_wait > 0;
+        m->y_at = t;
+        m->ky = ky;
+    }
+    int ramped = g_kbt.walk_full && t - m->x_at >= g_kbt.walk_full, back = 0;      /* back: 1 x, 2 y to the middle this poll */
+    if (attack && kx && t - m->x_at < g_kbt.smash_x) {
+        if (!m->x_full && (ramped || t - m->x_at > g_kbt.flick)) back |= 1;
+        m->x_full = 1;
+    }
+    if (attack && ky < 0 && t - m->y_at < g_kbt.smash_y) {
+        if (!m->y_full && t - m->y_at > g_kbt.flick) back |= 2;
+        m->y_full = 1;
+    }
+    if (back) { *buttons &= ~(1ull << BTN_A); m->smash_a = 1; }
+    if (back & 1) *lx = 0;
+    else if (kx && !m->x_full && !ramped) *lx = (int)(kx * g_kbt.walk * STICK_MAX);
+    if (back & 2) *ly = 0;
+    else if (ky < 0 && !m->y_full) *ly = -(int)(g_kbt.crouch * STICK_MAX);
+    /* Up: SSF2's tap jump leaves the ground only after the jump squat (2 of its frames: 4 here), and A or B pressed in it is an up
+     * smash or an up special on the ground. The game takes A in its own jump squat as an aerial (measured: up, then up + A two
+     * polls later = attack_air_hi), so up is held back for up_wait polls: A / B in them goes out with up in one poll (up smash,
+     * up special), up let go in them is one poll of up (a short hop), up still held after them is the jump, kept up_keep polls
+     * (the game's jump squat) so that it is a full hop. */
+    int up = ky > 0;
+    if (m->up_pend) {
+        if (attack || special || ky <= 0) up = 1, m->up_pend = 0;
+        else if (t - m->y_at >= g_kbt.up_wait) up = 1, m->up_pend = 0, m->up_keep = t + g_kbt.up_keep;
+        else up = 0;
+    } else if (t < m->up_keep) up = 1;
+    if (up) *ly = STICK_MAX; else if (ky > 0) *ly = 0;
+}
+
 /* kind: 0 = a style the controller is not reported in (zeroed), 1 = NpadFullKeyState (Pro Controller, 0x28 bytes), 2 = NpadGcState (0x30 bytes:
  * the same first 0x24 bytes, then analog trigger L at +0x24 and R at +0x28, 0..0x7fff; the layout follows libnx / suyu, NOT VERIFIED on a console). */
 static void fill_pad(uint64_t out, uint32_t id, int kind) {
@@ -604,6 +718,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
         lx = (key_for(id, VK_RIGHT, 18) - key_for(id, VK_LEFT, 16)) * STICK_MAX;
         ly = (key_for(id, VK_UP, 17) - key_for(id, VK_DOWN, 19)) * STICK_MAX;
         if (sdl_on()) { rx = (key_for(id, 0, 22) - key_for(id, 0, 20)) * STICK_MAX; ry = (key_for(id, 0, 21) - key_for(id, 0, 23)) * STICK_MAX; }
+        if (nnpad_kb_movement()) kb_ssf2(id, &buttons, &lx, &ly);
     }
     int slot = g_source[id];
     if (sdl_on()) {

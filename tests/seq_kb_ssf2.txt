@@ -1,0 +1,94 @@
+# [keyboard] movement = ssf2 (runtime/nnhid.c kb_ssf2): boot -> a fixed match -> one input of each rule, for SSBU_SEQ.
+# The keys of the sequence go through the same path as the keyboard (player 1). Run (one line), then read player 1's status
+# and motion per frame in kb_ssf2_fight.txt (the first line of each frame is player 1: x -40 at the start):
+#   python scripts/run.py --userdata <copy of a save folder past the first-start screens> --seq tests/seq_kb_ssf2.txt
+#     --seconds 420 --log kb_ssf2.log --env SSBU_KEYBOARD_MOVEMENT=ssf2 --env SSBU_FIGHT_HASH=kb_ssf2_fight.txt
+#     --env SSBU_DETERMINISTIC=1 --env SSBU_SKIP_MOVIES=1 --env SSBU_AUDIO_MUTE=1 --env SSBU_SPEED=0 --env SSBU_VK_PREP=0
+#     --env SSBU_DEBUG_END=2400
+#     --env "SSBU_DEBUG_MATCH=p1=mario,p2=mario,stage=battle_field,form=battlefield,p2=human,stock=3,items=off"
+# With SSBU_DETERMINISTIC the waits below count fight frames. Mario starts on the left platform of Battlefield.
+# The motions named are what the 2026-10-27 run gave (13.0.4); hash40(name) is the "mot" value of the log.
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40
+30:Z
+150:Z
+@draws:370-400/40
+30:Z
+@draws:270-295/40
+30:Z
+@draws:175-205/60
+30:u/30
+20:l/18
+30:Z
+60:r/50
+20:d/8
+30:Z
+@fight
+300
+# down: squat, squat_wait, squat_rv; Mario stays on the platform (full: pass, he drops through)
+0:d/30
+60
+# down twice: pass (drops to the main stage)
+0:d/3
+3
+0:d/20
+60
+# right: walk_slow .. walk_fast (full: dash, run); A while walking: attack_s3_s (forward tilt)
+0:r/20
+0:+rZ/4
+90
+# left and A 3 polls later: attack_s4_s (forward smash; the key pushes fully in A's poll)
+0:l/2
+0:+lZ/4
+90
+# right and A 6 polls later: attack_s4_s (the stick back to the middle for one poll, A with the full push in the next)
+0:r/5
+0:+rZ/4
+90
+# jump button for 2 polls: jump_f_mini, landing_light (the control for the next one)
+0:C/2
+50
+90
+# the same short hop and down near its top: fast fall (lands 12 frames earlier, landing_heavy)
+0:C/2
+16
+0:d/10
+90
+# up for one poll: jump_f_mini (short hop); up held: jump_f (full hop)
+0:u/1
+90
+0:u/10
+90
+# up and A 3 polls later: attack_hi4 (up smash on the ground, no jump; full: jump, attack_air_hi)
+0:u/2
+0:+uZ/4
+90
+# left, left again (turn_dash to the left), then right while dashing: a second turn_dash to the right (dash dance)
+0:l/3
+3
+0:l/4
+0:+r/10
+90
+# shield, then right: guard_on, escape_f (roll); shield, then down: guard_on, escape (spot dodge)
+0:A/10
+0:+Ar/4
+60
+0:A/10
+0:+Ad/4
+60
+# up and B together: special_hi
+0:uX/4
+120
+# down and A together: attack_lw4 (down smash)
+0:dZ/4
+90
+# left and A 8 polls later: attack_s4_s (the last poll of SSF2's window); right and A 11 polls later: attack_s3_s (tilt)
+0:l/7
+0:+lZ/4
+90
+0:r/10
+0:+rZ/4
+90

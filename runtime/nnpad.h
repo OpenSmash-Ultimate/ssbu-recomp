@@ -27,6 +27,7 @@ void nnpad_disconnect(int player);               /* DisconnectNpad: hidden until
 void nnpad_swap(int a, int b);                   /* SwapNpadAssignment */
 int  nnpad_keyboard_player(void);                /* 0..7, -1 = nobody; fixed once resolved (see controllers.ini) */
 int  nnpad_kb_vk(int idx);                       /* configured virtual key: 0..15 = Pro buttons, 16..19 = left stick left/up/right/down, 20..23 = right stick; 0 = unbound */
+int  nnpad_kb_movement(void);                   /* [keyboard] movement: 1 = ssf2 (nnhid.c kb_ssf2), 0 = full (a stick key pushes the stick fully) */
 int  nnpad_tool(int argc, char **argv);          /* --pad-test / --pad-map <n> / SSBU_PAD_TEST: returns the exit code, or -1 if this is no tool request */
 
 /* U1, the Controls page of the settings menu (menu.cpp). Targets 0..15 = the Pro buttons above, 16..23 = left stick

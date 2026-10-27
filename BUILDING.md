@@ -289,6 +289,21 @@ It is built only when Dear ImGui v1.91.9b is found: `scripts/install.py` downloa
 SHA-256, or give a folder with `python scripts/setup.py ... --imgui <folder with imgui.h>`, or set `IMGUI_ROOT`. Without it
 the build still works, and F1 only writes a log line saying why there is no menu.
 
+## Keyboard movement
+
+A key of the left stick pushes the stick fully at once, which the game reads as a flick: on the keyboard a direction always
+dashes and down always drops through a platform. `movement = ssf2` in the `[keyboard]` section of `config\controllers.ini`
+(or `SSBU_KEYBOARD_MOVEMENT=ssf2`; default `full`, the old behaviour) reads the keys the way Super Smash Flash 2 does
+(`runtime/nnhid.c` `kb_ssf2`, which lists the rules and the measurements):
+
+- a direction walks; the same key again within 200 ms of letting it go dashes; the other key while running dash-dances;
+- down crouches (and fast-falls in the air); down twice within 200 ms drops through a platform;
+- a direction and A within about 130 ms (down and A: 100 ms) is a smash attack, later a tilt; with the shield held a direction rolls;
+- up waits 4 frames: A or B in them is an up smash or an up special on the ground, otherwise it jumps (a tap is a short hop).
+
+Measured on Mario only (the stick thresholds are expected to be the same for every fighter). The game's own stick jump
+must be on (its default) for up to jump.
+
 ## On-screen keyboard
 
 When the game asks for text (a name, for example) a Switch-style keyboard is drawn over the picture (Vulkan renderer).
