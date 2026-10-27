@@ -4,7 +4,7 @@
 #   python scripts/run.py --userdata <copy of a save folder past the first-start screens> --seq tests/seq_kb_ssf2.txt
 #     --seconds 420 --log kb_ssf2.log --env SSBU_KEYBOARD_MOVEMENT=ssf2 --env SSBU_FIGHT_HASH=kb_ssf2_fight.txt
 #     --env SSBU_DETERMINISTIC=1 --env SSBU_SKIP_MOVIES=1 --env SSBU_AUDIO_MUTE=1 --env SSBU_SPEED=0 --env SSBU_VK_PREP=0
-#     --env SSBU_DEBUG_END=2400
+#     --env SSBU_DEBUG_END=3200
 #     --env "SSBU_DEBUG_MATCH=p1=mario,p2=mario,stage=battle_field,form=battlefield,p2=human,stock=3,items=off"
 # With SSBU_DETERMINISTIC the waits below count fight frames. Mario starts on the left platform of Battlefield.
 # The motions named are what the 2026-10-27 run gave (13.0.4); hash40(name) is the "mot" value of the log.
@@ -92,3 +92,15 @@
 0:r/10
 0:+rZ/4
 90
+# taunt (the d-pad up key, I in a sequence): alone and with up: appeal_hi; with down: appeal_lw; with left / right: appeal_s
+# (no jump, no drop, no step while the taunt key is held)
+0:I/4
+150
+0:Iu/4
+150
+0:Id/4
+150
+0:Il/4
+150
+0:Ir/4
+150

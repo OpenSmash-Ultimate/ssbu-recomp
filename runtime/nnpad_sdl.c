@@ -1439,6 +1439,13 @@ void nnpad_kb_player_set(int p) {                     /* -2 auto, -1 none, 0..7:
     }
     unlock();
 }
+void nnpad_kb_movement_set(int on) {                  /* the Controls page's "SSF2 style": written, and used at the next poll */
+    nnpad_kb_vk(0);
+    lock();
+    g_cfg.kb_move = on != 0;
+    kb_write();
+    unlock();
+}
 int nnpad_describe(char *out, int n) {               /* one line per device: "player N: name (type)"; returns the number of devices */
     int k = 0, o = 0;
     out[0] = 0;

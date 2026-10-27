@@ -687,6 +687,16 @@ static void kb_ssf2(uint32_t id, uint64_t *buttons, int *lx, int *ly) {
         else up = 0;
     } else if (t < m->up_keep) up = 1;
     if (up) *ly = STICK_MAX; else if (ky > 0) *ly = 0;
+    /* Taunt: SSF2 has one taunt key and takes the taunt from the direction held with it (Character.as initTaunt: neutral, up,
+     * down, side); the game has one taunt per d-pad direction. The key of the d-pad's up is that taunt key: with a direction key
+     * held it is that d-pad direction (none or up: up), and the stick stays in the middle meanwhile (SSF2 taunts standing). */
+    if (*buttons & 1ull << BTN_UP) {
+        *buttons &= ~(1ull << BTN_UP);
+        *buttons |= 1ull << (ky < 0 ? BTN_DOWN : kx < 0 ? BTN_LEFT : kx > 0 ? BTN_RIGHT : BTN_UP);
+        *lx = *ly = 0;
+        m->up_pend = 0;
+        m->up_keep = 0;
+    }
 }
 
 /* kind: 0 = a style the controller is not reported in (zeroed), 1 = NpadFullKeyState (Pro Controller, 0x28 bytes), 2 = NpadGcState (0x30 bytes:

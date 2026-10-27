@@ -749,6 +749,26 @@ static void sec_controls(void) {
         if (combo("Keyboard plays as player", &p, kp, N(kp))) { S.kb_player = p - 2; S0.kb_player = S.kb_player; nnpad_kb_player_set(S.kb_player); nnhid_kb_player_refresh(); }
         tag(0, 0);
         ImGui::SameLine(); ImGui::TextDisabled("now: %s", nnhid_kb_player() >= 0 ? kp[nnhid_kb_player() + 2] : "nobody");
+        bool ssf2 = nnpad_kb_movement() != 0;                  /* [keyboard] movement = ssf2 (nnhid.c kb_ssf2) */
+        if (ImGui::Checkbox("SSF2 Style", &ssf2)) nnpad_kb_movement_set(ssf2);
+        bool explain = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+        tag(0, 0);
+        ImGui::SameLine(); ImGui::TextDisabled("(?)");
+        if (explain || ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34.0f);
+            ImGui::TextUnformatted("The keyboard's left stick keys as in Super Smash Flash 2 (a keyboard game):\n"
+                                   "- a direction walks; the same key again within 200 ms dashes; the other key while running dash-dances\n"
+                                   "- down crouches, and fast-falls in the air; down twice drops through a platform\n"
+                                   "- a direction and A together (within about 130 ms) is a smash attack, later a tilt\n"
+                                   "- shield and a direction: roll; shield and down: spot dodge\n"
+                                   "- up waits 4 frames: with A an up smash, with B an up special, otherwise a jump (a tap is a short hop)\n"
+                                   "- the key of the d-pad's up is the taunt key: with a direction held, the taunt of that side\n"
+                                   "Off: a stick key pushes the stick fully, as a button does (a direction always dashes).\n"
+                                   "Saved in controllers.ini as [keyboard] movement = ssf2.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
     } else {
         int p = nnpad_player_cfg(dv->index) + 1;
         if (combo("Player", &p, pp, N(pp))) nnpad_player_assign(dv->index, p - 1);
