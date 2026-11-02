@@ -357,8 +357,8 @@ int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
  * window freeze after the X while closing the console window worked) is ended here, its log flushed first */
 static DWORD WINAPI close_watchdog(LPVOID arg) {
     (void)arg;
-    Sleep(4000);
-    printf("\nwindow closed but the game did not end within 4 s: ended now\n");
+    Sleep(70000);   /* (the Vulkan shutdown may take up to 63 s saving the pipeline cache: nvn_gl.c vk_shutdown_at_exit) */
+    printf("\nwindow closed but the game did not end within 70 s: ended now\n");
     fflush(stdout);
     TerminateProcess(GetCurrentProcess(), 0);
     return 0;

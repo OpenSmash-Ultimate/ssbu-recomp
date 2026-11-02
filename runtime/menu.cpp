@@ -1537,7 +1537,7 @@ static void exit_game(void) {                              /* F1 -> Exit game: t
     printf("menu: exit game\n");
     fflush(stdout);
     CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
-    CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
+    CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(70000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
 }
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
