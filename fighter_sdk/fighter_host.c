@@ -1203,7 +1203,7 @@ static void fh_hook(Ctx *c, void *user) {
                             wr32(rb + 0x14ull * i, (uint32_t)z | 1u); wr32(rb + 0x14ull * i + 4, (uint32_t)(z >> 32)); wr32(rb + 0x14ull * i + 8, (uint32_t)y); wr32(rb + 0x14ull * i + 12, (uint32_t)(y >> 32)); wr32(rb + 0x14ull * i + 16, 0);
                         }
                         printf("[fight] SSBU_RB_NET: the 9 script random generators set from the agreed match seed %016llx, counters 0\n", (unsigned long long)ms);
-                        if (getenv("SSBU_RB_NET_WATCH")) { void debug_watch(const uint64_t *a, int n); uint64_t w[2] = {rb, GA(0x71052c41b0ull) + 0x98}; debug_watch(w, 2); }   /* research: who writes the generators / match block + 0x98 next */
+                        if (getenv("SSBU_RB_NET_WATCH")) { void debug_watch(const uint64_t *a, int n); uint64_t w[2] = {rb, GA(0x71052c41b0ull) + 0x98}; const char *g = getenv("SSBU_RB_NET_WATCH_GEN"); if (g) w[0] = rb + 0x14ull * (uint64_t)atoi(g) + 8; debug_watch(w, 2); }   /* research: who writes the generators / match block + 0x98 next (_GEN=<i>: generator i's state words 2..3, 8-byte aligned) */
                     } else {
                     for (int i = 0; i < 9; i++) {
                         wr32(rb + 0x14ull * i, 0x12345678u + 0x9E3779B9u * (unsigned)i); wr32(rb + 0x14ull * i + 4, 0x2468ACE1u ^ (unsigned)i);
@@ -1229,8 +1229,11 @@ static void fh_hook(Ctx *c, void *user) {
                 input_mark("fight");
             }
         }
-        if (k < g_fh_n && !g_fh_out) ++g_fh_f[k].frame;
-        if (k < g_fh_n && g_fh_out) {
+        /* (rb6) the online checksum needs the record even without SSBU_FIGHT_HASH: before, a tester's game hashed nothing
+         * and sent no check (every report said "checksums compared 0") */
+        int rbn_hash_wanted(void); int want = g_fh_out || rbn_hash_wanted();
+        if (k < g_fh_n && !want) ++g_fh_f[k].frame;
+        if (k < g_fh_n && want) {
             long long f = ++g_fh_f[k].frame;
             float x = 0, y = 0, mf = 0, dmg = 0;
             int st = (int)fd_call(c, FD_N("30StatusModule__status_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
@@ -1253,6 +1256,7 @@ static void fh_hook(Ctx *c, void *user) {
             static int wk_on = -1; static double wk_id;
             if (wk_on < 0) { const char *w = getenv("SSBU_FIGHT_HASH_WORK"); wk_on = w && w[0] && (fd_value(w, &wk_id) || ((wk_id = (double)strtoul(w, NULL, 16)), wk_id != 0)); }
             char wtxt[32] = "";
+            if (!g_fh_out) goto no_line;
             if (wk_on) snprintf(wtxt, sizeof wtxt, " w %d", (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)wk_id, 0, 0, 0, 0, 0, NULL));
             fprintf(g_fh_out, "F %lld P %lld %d e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)%s\n",
                     f, g_rgs_next, g_ra_phase, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg, wtxt);
@@ -1263,6 +1267,7 @@ static void fh_hook(Ctx *c, void *user) {
                 printf("; frame line on thread %lu, pad poll on thread %lu; polls that saw 0 / 1 / 2 / 3+ new fight frames: %lld %lld %lld %lld; frame ends %lld, of them %lld reported dropped refreshes (%lld in all)\n", (unsigned long)GetCurrentThreadId(), (unsigned long)g_fh_poll_tid,
                        g_fh_poll_hist[0], g_fh_poll_hist[1], g_fh_poll_hist[2], g_fh_poll_hist[3], g_fh_frame_ends, g_fh_drop_calls, g_fh_drop_frames);
             }
+            no_line:;
         }
     }
     g_fh_orig(c);
@@ -1308,6 +1313,63 @@ int fight_seq_ticks(void) {
     g_fh_poll_hist[n < 0 ? 0 : n > 3 ? 3 : n]++; g_fh_poll_tid = GetCurrentThreadId();
     return n < 0 ? 0 : n > 100000 ? 100000 : (int)n;
 }
+/* research (SSBU_RB_LOADWATCH=1, 13.0.5): which threads append to the two load lists of the online-fight main
+ * 0x71015d99b0 (base + 0x19528 / + 0x19540, 0x18-byte entries) and change an entry's state (+ 0x14) */
+static ImportFn g_lw_orig;
+static int g_lw_watch, g_lw_fix;
+int rbn_started(void);
+static void lw_gate(Ctx *c, void *user) {
+    static long long n; static uint64_t last_sig, last_b0, last_b1; static int arms;
+    (void)user;
+    n++;
+    uint64_t p = rd64(0x71052c4000ull + 1176), base = p ? rd64(p) : 0;
+    uint64_t q = rd64(0x71052c5000ull + 248), R = q ? rd64(q) : 0;
+    if (g_lw_watch && base && R) {
+        /* the gate's view: entries (id:state) of both lists, then the ids still waiting in the loader's request queue
+         * (R + 1104 count, + 1112 head, + 1096 capacity, + 1128 slots of 16 bytes: + 4 taken, + 8 id) */
+        char line[1024]; int k = 0; uint64_t sig = 0xcbf29ce484222325ull;
+        for (int l = 0; l < 2; l++) {
+            uint64_t b = rd64(base + 0x19528 + 0x18 * l), e = rd64(base + 0x19528 + 0x18 * l + 8);
+            k += snprintf(line + k, sizeof line - k, " L%d:", l);
+            for (uint64_t a = b; a < e && a < b + 0x18 * 24 && k < 700; a += 0x18) {
+                unsigned id = rd16(a + 16), st = rd32(a + 20);
+                k += snprintf(line + k, sizeof line - k, " %u:%u", id, st); sig = (sig ^ (id << 8 | st)) * 0x100000001b3ull;
+            }
+        }
+        uint32_t cnt = rd32(R + 1104); uint64_t cap = rd64(R + 1096), head = rd64(R + 1112), buf = rd64(R + 1128);
+        k += snprintf(line + k, sizeof line - k, " | queue %u:", cnt);
+        for (uint32_t i = 0; i < cnt && i < 24 && cap && k < 980; i++) {
+            uint64_t s = buf + ((head + i) % cap) * 16;
+            unsigned id = rd16(s + 8), taken = rd32(s + 4);
+            k += snprintf(line + k, sizeof line - k, " %u%s", id, taken ? "t" : ""); sig = (sig ^ (id << 1 | (taken != 0))) * 0x100000001b3ull;
+        }
+        if (sig != last_sig) { last_sig = sig; printf("[loadwatch] call %lld fight frame %d tid %lu:%s\n", n, g_fh_n, GetCurrentThreadId(), line); fflush(stdout); }
+        /* hardware watch on the first entry's state of each list and the queue's count / head (re-armed when a list moves) */
+        uint64_t b0 = rd64(base + 0x19528), b1 = rd64(base + 0x19540);
+        if ((b0 != last_b0 || b1 != last_b1) && arms < 30 && (b0 || b1)) {
+            void debug_watch(const uint64_t *a, int n);
+            uint64_t w[4] = {b0 ? b0 + 16 : R + 1104, b1 ? b1 + 16 : R + 1104, R + 1104, R + 1112};
+            last_b0 = b0; last_b1 = b1; arms++;
+            printf("[loadwatch] call %lld: watching L0[0] %llx L1[0] %llx count %llx head %llx\n", n, (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3]);
+            fflush(stdout);
+            debug_watch(w, 4);
+        }
+    }
+    /* the entry adds draw from the script random generators; those draws happen on whatever logic frame the add falls on,
+     * which loads and rollback move, so in an online match they leave the generators as they were */
+    uint64_t rb = (g_lw_fix || g_lw_watch) ? fh_rng_base() : 0; uint32_t w[45];
+    if (rb) for (int i = 0; i < 45; i++) w[i] = rd32(rb + 4ull * i);
+    g_lw_orig(c);
+    if (rb && rb == fh_rng_base()) {
+        int d = 0;
+        for (int i = 0; i < 45; i++) d += rd32(rb + 4ull * i) != w[i];
+        if (d) {
+            static int logged;
+            if (logged++ < 20) { printf("[loadfix] call %lld (match %s): the gate changed %d generator words%s\n", n, rbn_started() ? "on" : "not started", d, g_lw_fix ? ", put back" : ""); fflush(stdout); }
+            if (g_lw_fix) for (int i = 0; i < 45; i++) wr32(rb + 4ull * i, w[i]);
+        }
+    }
+}
 static void fh_exit(void) { if (g_fh_out) { fflush(g_fh_out); if (g_fh_out != stdout) fclose(g_fh_out); g_fh_out = NULL; } }
 static void fight_hash_start(void) {
     const char *h = getenv("SSBU_FIGHT_HASH"), *d = getenv("SSBU_DETERMINISTIC"), *o = getenv("SSBU_DET_OFF");
@@ -1319,6 +1381,12 @@ static void fight_hash_start(void) {
     printf("[fight] SSBU_FIGHT_HASH %s, SSBU_DETERMINISTIC %d (off mask %d); hook on the fighters' frame line: %s\n", g_fh_out ? "on" : "off", g_fh_det, g_fh_detoff, id ? "installed or waiting for lua2cpp_common" : hook_error());
     if (g_fh_det) printf("[fight] SSBU_DETERMINISTIC: hook on the frame end %llx (dropped refreshes -> extra logic frames): %s\n", (unsigned long long)GA(0x710386fc30ull),
                          hook_install(GA(0x710386fc30ull), fh_frame_end, NULL, &g_fh_orig_frame_end) ? "installed" : hook_error());
+    {   const char *lf = getenv("SSBU_RB_LOADFIX");
+        g_lw_watch = getenv("SSBU_RB_LOADWATCH") != NULL;
+        g_lw_fix = rbn_handshake_wanted() && !(lf && lf[0] == '0');
+    }
+    if ((g_lw_watch || g_lw_fix) && g_game_build == GAME_13_0_5)
+        printf("[loadfix] hook on 0x71015d99b0 (generator restore %d, trace %d): %s\n", g_lw_fix, g_lw_watch, hook_install(0x71015d99b0ull, lw_gate, NULL, &g_lw_orig) ? "installed" : hook_error());
     atexit(fh_exit);
 }
 static void fd_exit(void) { printf("[debug] %lld commands executed, %lld frames skipped because a differential recording was open\n", g_fd_done, g_fd_waited); fflush(stdout); }

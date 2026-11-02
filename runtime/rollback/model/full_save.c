@@ -28,10 +28,10 @@ void save(Ctx *c) {
     {   int bad = 0;
         for (int i = 0; i < g_memory_map.range_count && !bad; i++) {
             Rng *r = &g_memory_map.ranges[i];
-            r->s = (rb_test_nomem() == 2 && i == g_memory_map.range_count / 2) ? NULL : rs_alloc(r->n);
+            r->s = g_rs_direct || (rb_test_nomem() == 2 && i == g_memory_map.range_count / 2) ? NULL : rs_alloc(r->n);
             r->dirty = calloc(r->n / PG, 1);
             r->async = calloc(r->n / PG, 1);
-            if (!r->s || !r->dirty || !r->async) { bad = 1; LOG("r1: FULL SAVE NOT MADE: allocation of %.1f MB for range %d of %d FAILED%s\n", r->n / 1048576.0, i, g_memory_map.range_count, rb_test_nomem() == 2 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=2)" : ""); }
+            if ((!r->s && !g_rs_direct) || !r->dirty || !r->async) { bad = 1; LOG("r1: FULL SAVE NOT MADE: allocation of %.1f MB for range %d of %d FAILED%s\n", r->n / 1048576.0, i, g_memory_map.range_count, rb_test_nomem() == 2 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=2)" : ""); }
         }
         if (!bad && !g_guest_fibers.pool) { g_guest_fibers.pool = malloc(g_guest_fibers.pool_cap); if (!g_guest_fibers.pool) { bad = 1; LOG("r1: FULL SAVE NOT MADE: fiber pool allocation FAILED\n"); } }
         if (!bad && g_ecap < 65536) { void *ne = realloc(g_e, 65536 * sizeof *g_e); if (ne) { g_e = ne; g_ecap = 65536; } else { bad = 1; LOG("r1: FULL SAVE NOT MADE: list allocation FAILED\n"); } }   /* no allocation while threads are held */
@@ -42,11 +42,11 @@ void save(Ctx *c) {
     if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save()); g_save_failed = 1; return; } } else park_quiet(0);
     fibers_save();
     double t1b = now_ms();
-    for (int i = 0; i < g_memory_map.range_count; i++) { memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
+    for (int i = 0; i < g_memory_map.range_count; i++) { if (!g_rs_direct) memcpy(g_memory_map.ranges[i].s, g_memory_map.ranges[i].a, g_memory_map.ranges[i].n); g_saved_bytes += g_memory_map.ranges[i].n; }
     double t2 = now_ms();
     {   /* pages the OTHER threads write while main is held here (audio, vsync counter, loaders, render threads): they are
          * not the simulation's; they are left out of restore and verify. SSBU_R1_PAUSE=<ms> (default 50, 0 = none) */
-        const char *pe = getenv("SSBU_R1_PAUSE"); int pause = pe ? atoi(pe) : 30;
+        const char *pe = getenv("SSBU_R1_PAUSE"); int pause = g_rs_direct ? 0 : pe ? atoi(pe) : 30;     /* (the ring base: no copy to compare with; its async pages were only ever used by the full restore) */
         size_t np = 0; int shown = 0;
         if (pause > 0) {
             Sleep((DWORD)pause);
@@ -60,8 +60,9 @@ void save(Ctx *c) {
                     }
             }
         }
-        int mfail = 0;
-        if (g_mark > 0 && g_session.cycle == 0) { g_ctx_save = *c; mfail = !mark_setup(); }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
+        int mfail = 0; double tm0 = now_ms();
+        if (g_mark > 0 && g_session.cycle == 0) { g_ctx_save = *c; mfail = !mark_setup(); }
+        LOG("r1: SAVE TIMES: pause + compare %.1f ms, mark setup %.1f ms\n", tm0 - t2, now_ms() - tm0);     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
         if (g_ra > 0 && !mfail) nvn_r1_cb_save();
         unpark();
         if (mfail) { release(); g_save_failed = 2; return; }

@@ -3,6 +3,7 @@
  *   ACK   type 2 | frame i32
  *   PING  type 3 | frame i32 | time_us u64
  *   PONG  type 4 | frame i32 | time_us u64 | echo_us u64
+ *   SYNC  type 5 | frame i32 | margin i32 (in ack; older builds count it as a bad message and ignore it)
  *   pad   buttons u64 | lx i16 | ly i16 | rx i16 | ry i16
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include <string.h>
@@ -39,6 +40,7 @@ size_t rb_msg_build(uint8_t *b, size_t cap, const RbMsg *m) {
     case RB_MSG_ACK: if (cap < 5) return 0; b[0] = RB_MSG_ACK; put32(b + 1, (uint32_t)m->frame); return 5;
     case RB_MSG_PING: if (cap < 13) return 0; b[0] = RB_MSG_PING; put32(b + 1, (uint32_t)m->frame); put64(b + 5, m->time_us); return 13;
     case RB_MSG_PONG: if (cap < 21) return 0; b[0] = RB_MSG_PONG; put32(b + 1, (uint32_t)m->frame); put64(b + 5, m->time_us); put64(b + 13, m->echo_us); return 21;
+    case RB_MSG_SYNC: if (cap < 9) return 0; b[0] = RB_MSG_SYNC; put32(b + 1, (uint32_t)m->frame); put32(b + 5, (uint32_t)m->ack); return 9;
     }
     return 0;
 }
@@ -69,6 +71,7 @@ int rb_msg_parse(const uint8_t *b, size_t len, RbMsg *m) {
     case RB_MSG_ACK: if (len != 5) return 0; m->frame = (int32_t)get32(b + 1); return 1;
     case RB_MSG_PING: if (len != 13) return 0; m->frame = (int32_t)get32(b + 1); m->time_us = get64(b + 5); return 1;
     case RB_MSG_PONG: if (len != 21) return 0; m->frame = (int32_t)get32(b + 1); m->time_us = get64(b + 5); m->echo_us = get64(b + 13); return 1;
+    case RB_MSG_SYNC: if (len != 9) return 0; m->frame = (int32_t)get32(b + 1); m->ack = (int32_t)get32(b + 5); return 1;
     }
     return 0;
 }

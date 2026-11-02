@@ -36,7 +36,7 @@ int rb_input_take_mismatch(void);
 int rb_input_finalized(void);
 
 /* ---------------------------------------------------------------- wire format (rb_wire.c), little-endian */
-enum { RB_MSG_PADS = 1, RB_MSG_ACK = 2, RB_MSG_PING = 3, RB_MSG_PONG = 4 };
+enum { RB_MSG_PADS = 1, RB_MSG_ACK = 2, RB_MSG_PING = 3, RB_MSG_PONG = 4, RB_MSG_SYNC = 5 };      /* SYNC (rb6): frame = the sender's frame, ack = its pad arrival margin (1/1000 frame) */
 #define RB_PAD_WIRE 16
 #define RB_PADS_HEAD 20
 #define RB_MAX_PADS_PER_MSG 64

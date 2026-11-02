@@ -97,6 +97,7 @@ void r1_hold_prof_report(void) {
     LOG("r1: HOLD PROF: %lld holds; fiber checks %lld, %.4f ms each\n", g_hp_holds, g_hp_fib_n, g_hp_fib_n ? g_hp_fib_ms / g_hp_fib_n : 0.0);
     for (int i = 0; i < g_hp_n; i++) LOG("r1: HOLD PROF thread %s: %lld times, mean %.4f ms, max %.3f ms, retries %lld\n", g_hp[i].n, g_hp[i].cnt, g_hp[i].ms / (g_hp[i].cnt ? g_hp[i].cnt : 1), g_hp[i].mx, g_hp[i].spins);
 }
+static double g_ra_hold_end = 1e300;                    /* ra_hold_quiet's deadline: one slow thread after another (each under the park limit) added up to 130-345 ms at the match start */
 static int ra_hold_save(void) {
     DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h;
     if (g_hp_on < 0) g_hp_on = getenv("SSBU_RB_HOLD_PROF") && atoi(getenv("SSBU_RB_HOLD_PROF")) > 0;
@@ -125,7 +126,7 @@ static int ra_hold_save(void) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
             if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; break; }
             ResumeThread(t->h); spins++;
-            if (now_ms() - t0 > g_ra_park_ms) {
+            if (now_ms() - t0 > g_ra_park_ms || now_ms() > g_ra_hold_end) {
                 if (g_hp_on) hp_add(t->name, now_ms() - t0, spins);
                 for (int j = 0; j < i; j++) if (g_guest_threads.table[j].held) { ResumeThread(g_guest_threads.table[j].h); g_guest_threads.table[j].held = 0; }
                 if (all_first) for (int j = i + 1; j < g_guest_threads.count; j++) if (pre[j]) { ResumeThread(g_guest_threads.table[j].h); pre[j] = 0; }
@@ -163,6 +164,13 @@ void ra_hold_restore(void) {
                     { static int said_a; if (said_a++ < 200) LOG("r1: hold for a load: sound thread %s taken at ANOTHER wait after %.1f ms: saved at %s @%llx, now %s @%llx (loads like this so far: %lld)\n", t->name ? t->name : "?",
                         now_ms() - t0, t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, g_guest_threads.audio_other); }
                     break; } }
+            /* (lo16j) a thread other than audio blocked at ANOTHER wait has moved on since the capture (ResLoadingThread: SleepThread then,
+             * WaitEvent now): its stack would go back under it. Counted as running, so the load is refused, after 50 ms instead of 500 */
+            if (!ra_audio(t->name) && now_ms() - t0 > 50 && waiting_import(t->c->in_import) && th_blocked(t->h) && !getenv("SSBU_RB_MOVED_OK")) {
+                t->held = 1; g_guest_threads.mismatch++; g_guest_threads.running++;
+                static int said_m; if (said_m++ < 20) LOG("r1: hold for a load: thread %s moved on to another wait: held at %s @%llx then, now %s @%llx\n", t->name ? t->name : "?",
+                    t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from);
+                break; }
             if (now_ms() - t0 > 500) { t->held = 1; g_guest_threads.mismatch++; if (!(waiting_import(t->c->in_import) && th_blocked(t->h))) g_guest_threads.running++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
@@ -188,7 +196,8 @@ static long long g_ra_fiber_waits, g_ra_fiber_skips; static double g_ra_fiber_wa
 int ra_hold_quiet(double limit) {
     double t0 = now_ms(); int tries = 0;
     for (;;) {
-        if (ra_hold_save()) {
+        g_ra_hold_end = t0 + limit; int ok = ra_hold_save(); g_ra_hold_end = 1e300;
+        if (ok) {
             double tf = g_hp_on > 0 ? now_ms() : 0; int fq = ra_fibers_quiet(); if (g_hp_on > 0) { g_hp_fib_ms += now_ms() - tf; g_hp_fib_n++; }
             if (fq) { if (tries) { g_ra_fiber_waits++; g_ra_fiber_wait_ms += now_ms() - t0; } return 1; }
             for (int i = 0; i < g_guest_threads.count; i++) if (g_guest_threads.table[i].held) { ResumeThread(g_guest_threads.table[i].h); g_guest_threads.table[i].held = 0; }

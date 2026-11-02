@@ -101,7 +101,7 @@ static unsigned g_sec_appended, g_sec_released, g_sec_peak, g_sec_polls, g_sec_e
 /* Underruns (bounded round 2026-10-09): the device played every buffer it had while the output was started, i.e. the
  * game did not append the next one in time; the listener hears a gap until the next AppendAudioOutBuffer. Counted from
  * the first buffer with sound on (before it the game's mixer may legitimately idle). audio_report prints them. */
-static unsigned long long g_underruns, g_underrun_ticks, g_underrun_longest;
+static unsigned long long g_underruns, g_underrun_ticks, g_underrun_longest, g_underrun_longest_win;   /* _win: longest since the last 10 s line */
 static LONGLONG g_empty_since;
 static unsigned g_queue_max;
 /* A second, stricter measure: at an append, the DEVICE's own play position (waveOutGetPosition, samples) had already
@@ -205,6 +205,7 @@ static DWORD WINAPI audio_thread(LPVOID arg) {
     unsigned seconds = 0;
     int every_second = getenv("SSBU_AUDIO_LOG") != NULL;
     unsigned acc_appended = 0, acc_released = 0, acc_peak = 0, acc_polls = 0, acc_empty = 0;
+    unsigned long long last_ur = 0, last_urt = 0, last_starved = 0, ur = 0, urt = 0, urlong = 0, starved = 0;   /* RB4: dropouts per 10 s line, so a session's crackles can be lined up with its rollbacks and stalls */
     for (;;) {
         WaitForSingleObject(g_wake, 2);
         EnterCriticalSection(&g_lock);
@@ -222,12 +223,17 @@ static DWORD WINAPI audio_thread(LPVOID arg) {
             g_sec_appended = g_sec_released = g_sec_peak = g_sec_polls = g_sec_empty = 0;
             if (g_wav) wav_header();
             report = g_open && (every_second || seconds % 10 == 0);
+            if (report) { ur = g_underruns; urt = g_underrun_ticks; urlong = g_underrun_longest_win; starved = g_starved; g_underrun_longest_win = 0; }
         }
         LeaveCriticalSection(&g_lock);
         if (n && ev) os_signal_event(ev);
         if (report) {
-            printf("nn::audio: t=%us appended %u released %u polls %u (empty %u) queued %u peak %u, total %llu buffers, %llu s with sound\n",
-                   seconds, acc_appended, acc_released, acc_polls, acc_empty, queued, acc_peak, g_total_appended, g_nonsilent_seconds);
+            double f = g_freq.QuadPart ? (double)g_freq.QuadPart : 1.0;
+            printf("nn::audio: t=%us appended %u released %u polls %u (empty %u) queued %u peak %u, total %llu buffers, %llu s with sound; "
+                   "dropouts %llu (%.1f ms, longest %.1f ms), appends with the device out of samples %llu\n",
+                   seconds, acc_appended, acc_released, acc_polls, acc_empty, queued, acc_peak, g_total_appended, g_nonsilent_seconds,
+                   ur - last_ur, (double)(urt - last_urt) * 1000.0 / f, (double)urlong * 1000.0 / f, starved - last_starved);
+            last_ur = ur; last_urt = urt; last_starved = starved;
             fflush(stdout);
             acc_appended = acc_released = acc_peak = acc_polls = acc_empty = 0;
         }
@@ -372,7 +378,7 @@ static void audio_AppendAudioOutBuffer(Ctx *c) {      /* (AudioOut *, AudioOutBu
         g_tail++;
         if (g_empty_since) {
             unsigned long long gap = (unsigned long long)(now_ticks() - g_empty_since);
-            g_underrun_ticks += gap; if (gap > g_underrun_longest) g_underrun_longest = gap;
+            g_underrun_ticks += gap; if (gap > g_underrun_longest) g_underrun_longest = gap; if (gap > g_underrun_longest_win) g_underrun_longest_win = gap;
             g_empty_since = 0;
         }
         if (g_tail - g_head > g_queue_max) g_queue_max = g_tail - g_head;

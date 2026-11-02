@@ -8,6 +8,7 @@
  *     from the guess, that frame is a MISMATCH: the caller must roll back to before it and run it again.
  * Frames are counted from 1. Each table below is a ring of RB_RING slots indexed by frame & RING_MASK; every slot also
  * stores the frame number it holds, so a slot left over from an older lap of the ring is never taken for a current one. */
+#include <stdlib.h>
 #include <string.h>
 #include "../rollback.h"
 
@@ -40,8 +41,16 @@ void rb_input_reset(int nplayers, int local, int delay) {
 /* The input delay in force (after the clamp in rb_input_reset). */
 int rb_input_delay(void) { return g_input_delay; }
 
-/* A stick value inside the rest zone is exactly 0, anything else is kept: controller noise must not cause a rollback. */
-static int16_t stick_to_rest(int16_t v) { return (v >= -RB_STICK_REST && v <= RB_STICK_REST) ? 0 : v; }
+/* A stick value inside the rest zone is exactly 0: controller noise must not cause a rollback. (rb6) Outside it the value
+ * is rounded toward 0 to a step of 1 << SSBU_RB_STICK_Q (default 8: 256 levels per axis, finer than a GameCube stick): a
+ * stick held still wobbles by a few of the 65536 steps, and every wobble of the other player's stick was a wrong guess
+ * and a rollback. Both games must use the same value (it changes the pads both simulate); 0 = exact values as before. */
+static int stick_shift(void) { static int q = -1; if (q < 0) { const char *e = getenv("SSBU_RB_STICK_Q"); q = e && *e ? atoi(e) : 8; if (q < 0 || q > 12) q = 8; } return q; }
+static int16_t stick_to_rest(int16_t v) {
+    if (v >= -RB_STICK_REST && v <= RB_STICK_REST) return 0;
+    int m = ~((1 << stick_shift()) - 1);
+    return (int16_t)(v >= 0 ? (v & m) : -((-(int)v) & m));
+}
 /* The pad with all four stick axes passed through stick_to_rest; both sides apply it before a pad is stored or sent, so they agree. */
 RbPad rb_pad_rest(RbPad p) { p.lx = stick_to_rest(p.lx); p.ly = stick_to_rest(p.ly); p.rx = stick_to_rest(p.rx); p.ry = stick_to_rest(p.ry); return p; }
 /* 1 when the two pads have the same buttons and the same four stick values. */

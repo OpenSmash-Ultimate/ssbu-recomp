@@ -128,3 +128,38 @@ static void audit_run(const char *what, long long which) {
         LOG("r1: RING AUDIT   block %p (%s): %lld pages differ; first page %p; owner:%s;%s\n", (void *)(uintptr_t)(b.block << 16), where((uint8_t *)(uintptr_t)(b.block << 16)), b.pages, (void *)b.first, own[0] ? own : " none of the guest threads' TLS or stacks", words);
     }
 }
+
+/* PAGE DUMP (SSBU_RB_PAGEDUMP=<n>: every n-th frame; unset or 0 = off). Debugging aid for "the two games of an online match split".
+ * The frame checksum only covers the fighters, so a difference in the stage, items or anything else shows up only once it reaches a
+ * fighter, frames later. This writes, after the capture of every n-th frame, a 64-bit hash of every saved page (the ring's newest
+ * value: what the capture took) to <SSBU_RB_NET_LOG>.pages: "PGD1", the frame (int64), the page count (uint32), then one hash per
+ * page id (0 = zero page, 1 = decommitted, 2 = not simulation / asynchronous). Page ids of the two windows are guest addresses, so
+ * they line up between two games; extras are host allocations and may not. A frame captured again after a rollback is written
+ * again: the last record of a frame is its final state. Comparing two games' files (tests/pagediff.py) gives the pages that differ
+ * first. Cost: hashes all saved memory, about as long as an audit. */
+void rg_pagedump(long long frame) {
+    static int every = -1; static FILE *f; static uint64_t *h; static size_t hn;
+    if (every < 0) {
+        const char *e = getenv("SSBU_RB_PAGEDUMP"), *l = getenv("SSBU_RB_NET_LOG");
+        every = e ? atoi(e) : 0;
+        if (every > 0) { char path[1024]; snprintf(path, sizeof path, "%s.pages", l && *l ? l : "rb_pagedump"); f = fopen(path, "wb");
+            LOG("r1: PAGE DUMP every %d frames to %s%s\n", every, path, f ? "" : ": cannot open"); }
+        if (!f) every = 0;
+    }
+    if (every <= 0 || frame <= 0 || frame % every) return;
+    double t0 = now_ms();
+    uint32_t total = (uint32_t)(g_rg_n1 + g_rg_n2 + g_rg_nx);
+    if (hn < total) { free(h); h = malloc(sizeof *h * total); hn = h ? total : 0; if (!h) return; }
+    for (uint32_t id = 0; id < total; id++) {
+        const uint8_t *s = rg_src(id); uint8_t *a = rg_addr(id);
+        if (s == (const uint8_t *)1) { h[id] = 1; continue; }
+        if (a && (is_nosim(a) || (g_audio_free && is_async(a)))) { h[id] = 2; continue; }
+        if (!s) { h[id] = 0; continue; }
+        const uint64_t *w = (const uint64_t *)s; uint64_t x = 0x9e3779b97f4a7c15ull;
+        for (int k = 0; k < PG / 8; k++) { x ^= w[k]; x *= 0xff51afd7ed558ccdull; x ^= x >> 32; }
+        h[id] = x < 3 ? x + 3 : x;
+    }
+    int64_t fr = frame;
+    fwrite("PGD1", 1, 4, f); fwrite(&fr, 8, 1, f); fwrite(&total, 4, 1, f); fwrite(h, 8, total, f); fflush(f);
+    static int logged; if (logged++ < 3) LOG("r1: PAGE DUMP frame %lld: %u pages (window 1 %zu at %p, window 2 %zu at %llx, extras %zu), %.0f ms\n", frame, total, g_rg_n1, (void *)g_win1, g_rg_n2, (unsigned long long)WIN2, g_rg_nx, now_ms() - t0);
+}

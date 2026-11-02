@@ -1017,6 +1017,7 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (rb_fault_try_absorb(ep)) return EXCEPTION_CONTINUE_EXECUTION;      /* a fault in a leaf memory helper during a fight: the helper returns 0 and the pass is reloaded at its end */
     { void rg_dump_recent_loads(const char *why); rg_dump_recent_loads("the game is about to end (host exception)"); }
+    { void rb_log_drain(void); rb_log_drain(); }     /* the r1 log lines still in memory (a rollback match) */
     static volatile LONG owner;                     /* one report and one dump: a second thread that faults meanwhile waits for the exit */
     LONG me = (LONG)GetCurrentThreadId(), was = InterlockedCompareExchange(&owner, me, 0);
     if (was == me) TerminateProcess(GetCurrentProcess(), 4);      /* a fault inside the report itself ends the process */

@@ -381,6 +381,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
             if (g_hs_m.rule_kind == 1) g_hs_m.stock = 1;
         }
         if (g_hs_ok && !g_hs_local) {
+            { void r1_find_heaps_early(void); r1_find_heaps_early(); }      /* rollback/model/memory_map.c: off the first fight's base save */
             if (!g_hs_lwr) {                              /* (R3 lwr: a room's match: the stage, hazards and items are the room's, the same on both PCs) */
             for (int k = 0; k < 0x20; k++) wr8(sel + (uint64_t)k, g_hs_m.stage[k]);
             wr8(GA(0x7105309985ULL), g_hs_m.hazards); wr32(MELEE_INFO + 0x54, g_hs_m.items);
@@ -471,6 +472,10 @@ static void match_player_hook(Ctx *c, void *user) {
     uint64_t st = c->x[0], rec = c->x[3]; int idx = (int)c->x[1];
     uint64_t was = rd64(st + 0x88); uint32_t type_was = rd32(st + 0x78);
     if (idx == 0) { g_hs_p1_ok = safe_read(st, g_hs_p1, sizeof g_hs_p1); InterlockedIncrement(&g_dm_setups); }
+    if (idx >= 0 && idx < 4)                              /* (RB4) every set-up's panel states as the screens left them: "player 2 not picked" after a couple of matches */
+        printf("[rbnet] set-up %ld: player %d as the screens left it: type %u, ui_chara %016llx colour %u, name tag %u, network player %u, controller slot %d, profile %d (caller %llx)\n",
+               (long)g_dm_setups, idx + 1, type_was, (unsigned long long)was, rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214),
+               (unsigned long long)c->x[30]);
     if (idx == 0 && g_dm_list) {                          /* SSBU_DEBUG_MATCH_LIST: every new match set-up takes the next line (the last one stays) */
         char line[256];
         if (fgets(line, sizeof line, g_dm_list)) { line[strcspn(line, "\r\n")] = 0; if (line[0]) { g_dm_fight++; parse_match(line); } }

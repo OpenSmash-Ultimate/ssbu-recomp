@@ -44,6 +44,9 @@ static void find_heaps(void) {             /* once: the reservations of >= 16 GB
     if (cur && span >= (16ull << 30) && g_memory_map.heap_count < 8) g_memory_map.heap_base[g_memory_map.heap_count++] = cur;
     for (int i = 0; i < g_memory_map.heap_count; i++) LOG("r1: game address region %d at %p\n", i, (void *)g_memory_map.heap_base[i]);
 }
+/* the scan above walks the whole address space (~130 ms): the match handshake runs it on the set-up screen so the first
+ * fight's base save does not (the regions are made at boot; collect already keeps them for every later match) */
+void r1_find_heaps_early(void) { if (!g_memory_map.heap_count) find_heaps(); }
 static uint64_t g_ex[512][2]; static int g_nex;                       /* other guest threads' stacks: never saved / restored */
 static void ex_cb(uint64_t key, int sig, int cnt, uint64_t len, uint64_t thread, uint64_t stack, uint64_t size) {
     (void)key; (void)sig; (void)cnt; (void)len; (void)thread;
@@ -81,7 +84,7 @@ static void add_fighter_dlls(void) {
 void *rs_alloc(size_t n) { return n ? VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) : NULL; }
 void rs_free(void *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
 
-int g_rs_drop;                                   /* set by the first save's callers (the ring, run-ahead): r->s given back during mark_setup */
+int g_rs_drop, g_rs_direct;                                   /* set by the first save's callers (the ring, run-ahead): r->s given back during mark_setup */
 static int g_rb_test_nomem = -1;                        /* SSBU_RB_NET_TEST_NOMEM (test only): 1 = the commit check says no, 2 = an allocation of the full save fails, 3 = the ring's own allocations fail, 4 = the shadow's commit fails */
 /* SSBU_RB_NET_NOROLLBACK=1: the match is played WITHOUT rollback (delay-based: every frame waits for the other player's pad), the way the game's own online play works.
  * It uses the same path as "no memory for the ring" (the ring's base is not made), so nothing is rolled back and no state is saved. */

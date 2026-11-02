@@ -23,7 +23,7 @@
  *     match's base (r1_ring_rebase) protects everything again with an empty learned set.
  *   SSBU_LS_CMP (default ON since R3 net3; =0 off): a capture compares each learned page with its newest value first (in parallel, the ring's copy threads)
  *   and copies only the pages that changed (less ring memory, smaller loads; the compare reads both copies).
- *   SSBU_LS_DECAY=<n> (implies CMP; default off): every n captures the pages unchanged for n captures go read-only again.
+ *   SSBU_LS_DECAY=<n> (implies CMP; default 16 since rb6, =0 off): every n captures the pages unchanged for n captures go read-only again.
  * THE PRESENTATION POOL (on with the learned set): the blocks the game's jemalloc would make for three allocation sites proven
  *   not simulation state (R4 sections 3 and 8: the graphics 16 MB buffer, an 8 MB block, the 1.4 MB blocks; list "rt_big3",
  *   built in) are served from a separate reservation of this exe that the ring never sees (not in a window, not an extra:
@@ -394,10 +394,14 @@ void xww_poll(void) {
 static void xww_decay(const uint32_t *xjob, const uint8_t *xdiff, size_t nxj) {
     if (g_xcnt_cap < g_xn + 1) { free(g_xcnt); g_xcnt_cap = g_xn + 1; g_xcnt = calloc(g_xcnt_cap, 1); if (!g_xcnt) { g_xcnt_cap = 0; return; } }
     size_t learned = 0; long long done = 0;
+    /* (rb3) The setup poll puts every page written since the reservation in the set: a tester's 1.8 GB texture range landed in the extras
+     * and its first 24 captures compared all of it (78 ms each, 2 s of stalls for both players). At the first capture after a base the ring
+     * holds only the base, so a page equal to its base value is equal at every state and can leave the set at once. */
+    int need = g_xls_caps == 1 ? 1 : g_xls_decay;
     for (size_t q = 0; q < nxj; q++) {
         size_t e = xjob[q]; if (e >= g_xn || g_xst[e] != 2) continue;
         learned++;
-        if (xdiff[q]) g_xcnt[e] = 0; else if (++g_xcnt[e] >= g_xls_decay) { g_xst[e] = 1; g_xcnt[e] = 0; done++; }
+        if (xdiff[q]) g_xcnt[e] = 0; else if (++g_xcnt[e] >= need) { g_xst[e] = 1; g_xcnt[e] = 0; done++; }
     }
     g_xls_decayed += done;
     if (g_xls_caps % 300 == 1)
@@ -482,7 +486,8 @@ void ls_start_after_base(void) {
         g_ls_learned_capture_no = VirtualAlloc(NULL, (size_t)g_ls_learned_capacity * 4, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (!g_ls_page_state || !g_ls_learned_ids || !g_ls_learned_capture_no) { LOG("r1: LS: allocation FAILED: off\n"); g_ls_page_state = NULL; g_ls_enabled = 0; return; }
         g_ls_compare_before_copy = !(getenv("SSBU_LS_CMP") && getenv("SSBU_LS_CMP")[0] == '0');      /* (R3 net3) default ON: the same tick time, a quarter of the ring memory (SSBU_LS_CMP=0: every learned page copied) */
-        if (getenv("SSBU_LS_DECAY")) { g_ls_decay_every = atoi(getenv("SSBU_LS_DECAY")); if (g_ls_decay_every > 0) g_ls_compare_before_copy = 1; }
+        g_ls_decay_every = getenv("SSBU_LS_DECAY") ? atoi(getenv("SSBU_LS_DECAY")) : 16;      /* (rb6) default 16, over the ring depth: loads 7.9k -> 4.5k pages (-1 ms), captures -1 ms, still exact; =0 off */
+        if (g_ls_decay_every > 0) g_ls_compare_before_copy = 1;
         g_ls_exe_module = GetModuleHandleA(NULL);
         {   const char *names[] = {getenv("SSBU_R1_GAMEDLL"), "ssbu_game.dll", "ssbu_game_p15n3.dll", "ssbu_game_eh_o1.dll", "ssbu_game_1305x.dll"};
             for (int i = 0; i < 5 && !g_ls_game_module; i++) if (names[i] && names[i][0]) g_ls_game_module = GetModuleHandleA(names[i]); }

@@ -51,6 +51,7 @@ void r1_register_heap(void) { r1_on(); }
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
@@ -65,6 +66,55 @@ Ctx g_ctx_save;
 static double g_qpf;
 double now_ms(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart * 1000.0 / g_qpf; }
 FILE *g_log;
+/* (ot2) a 310 ms freeze in BOTH games at once, near frame 1283: the game thread was in fflush < WriteFile under rbg_step_body,
+ * a LOG line waiting on the disk (the build is on a hard drive). A match logs ~370 lines, one per rollback, each flushed on the
+ * game thread. So while a rollback match is on the lines go to memory and a host thread (not a guest thread: no rollback holds it)
+ * writes them every 50 ms; the rest of the time LOG writes and flushes as before. SSBU_R1_LOG_SYNC=1: always straight. */
+#define RBL_CAP (4u << 20)
+static char g_rbl_buf[2][RBL_CAP]; static size_t g_rbl_n; static int g_rbl_cur, g_rbl_on, g_rbl_sync = -1; static long long g_rbl_lost;
+static CRITICAL_SECTION g_rbl_cs, g_rbl_wcs; static INIT_ONCE g_rbl_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK rbl_init(PINIT_ONCE o, PVOID p, PVOID *c) { (void)o; (void)p; (void)c; InitializeCriticalSection(&g_rbl_cs); InitializeCriticalSection(&g_rbl_wcs); return TRUE; }
+void rb_log_drain(void) {
+    if (!g_log) return;
+    InitOnceExecuteOnce(&g_rbl_once, rbl_init, NULL, NULL);
+    EnterCriticalSection(&g_rbl_wcs);                   /* one writer at a time: the buffer it writes is not the one LOG fills */
+    EnterCriticalSection(&g_rbl_cs);
+    char *b = g_rbl_buf[g_rbl_cur]; size_t n = g_rbl_n; long long lost = g_rbl_lost;
+    g_rbl_cur ^= 1; g_rbl_n = 0; g_rbl_lost = 0;
+    LeaveCriticalSection(&g_rbl_cs);
+    if (n) fwrite(b, 1, n, g_log);
+    if (lost) fprintf(g_log, "r1: LOG: %lld lines lost (the memory buffer was full)\n", lost);
+    if (n || lost) fflush(g_log);
+    LeaveCriticalSection(&g_rbl_wcs);
+}
+static DWORD WINAPI rbl_thread(LPVOID p) { (void)p; for (;;) { Sleep(50); rb_log_drain(); } }
+void rb_log_async(int on) {
+    if (g_rbl_sync < 0) { const char *e = getenv("SSBU_R1_LOG_SYNC"); g_rbl_sync = e && e[0] == '1'; }
+    if (g_rbl_sync || !g_log) return;
+    InitOnceExecuteOnce(&g_rbl_once, rbl_init, NULL, NULL);
+    static int started;
+    if (on && !started) { HANDLE h = CreateThread(NULL, 0, rbl_thread, NULL, 0, NULL); if (!h) return; CloseHandle(h); started = 1; }
+    if (on) { g_rbl_on = 1; return; }
+    g_rbl_on = 0; rb_log_drain();                       /* off: what is in memory first, so the lines stay in order */
+}
+void rb_log(const char *fmt, ...) {
+    char sb[1024], *b = sb; va_list ap;
+    va_start(ap, fmt); int n = vsnprintf(sb, sizeof sb, fmt, ap); va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof sb && (b = malloc((size_t)n + 1))) { va_start(ap, fmt); vsnprintf(b, (size_t)n + 1, fmt, ap); va_end(ap); }
+    if (!b) { b = sb; n = sizeof sb - 1; }
+    if (g_rbl_on) {
+        EnterCriticalSection(&g_rbl_cs);
+        if (g_rbl_n + (size_t)n <= RBL_CAP) { memcpy(g_rbl_buf[g_rbl_cur] + g_rbl_n, b, (size_t)n); g_rbl_n += (size_t)n; } else g_rbl_lost++;
+        LeaveCriticalSection(&g_rbl_cs);
+    } else if (g_log) {
+        InitOnceExecuteOnce(&g_rbl_once, rbl_init, NULL, NULL);
+        EnterCriticalSection(&g_rbl_wcs);               /* after a drain still writing, not in between its lines */
+        fwrite(b, 1, (size_t)n, g_log); fflush(g_log);
+        LeaveCriticalSection(&g_rbl_wcs);
+    }
+    if (b != sb) free(b);
+}
 char g_born[2048]; int g_nborn;
 uint64_t g_catch_addr;
 __declspec(dllexport) uint8_t *r1_m1, *r1_m2;          /* the exe's own copy (r1src\sdklift_gen.c built with R1_MARK) */

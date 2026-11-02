@@ -1501,6 +1501,13 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
             if (want != prio) { SetThreadPriority(GetCurrentThread(), want); prio = want; }
         }
         EnterCriticalSection(&g_sh_lock);
+        {   /* online rollback, in a fight: only the first SSBU_VK_FIGHT_WORKERS (default 4) workers take jobs. Two games on one PC
+             * (run lo14): 14 workers each starved game h's main thread at the match start (frames of 200-800 ms, thread holds of
+             * 200 ms for the ring captures); with 4 workers (lo15) those frames were gone. Rollback needs the spare cores. */
+            static int cap = -2;
+            if (cap == -2) { const char *e = getenv("SSBU_RB_NET"), *w = getenv("SSBU_VK_FIGHT_WORKERS"); cap = !(e && e[0] && e[0] != '0') ? -1 : w ? atoi(w) : 4; if (cap == 0) cap = -1; }
+            while (cap > 0 && (int)(uintptr_t)arg >= cap && fight_recent() && !g_m4_quit) SleepConditionVariableCS(&g_sh_cv, &g_sh_lock, 100);      /* not g_jq_cv: its single wakes must reach a worker that takes the job */
+        }
         /* session 10: a preparation job may be taken when nothing else waits; in a fight by at most g_prep_fight_cap workers */
 #define PQ_OK (g_pq_head && g_pq_running < (g_prep_urgent ? 64 : fight_recent() ? g_prep_fight_cap : g_prep_cap))
         while (!g_jq_head && !g_bq_head && !PQ_OK && !g_m4_quit) SleepConditionVariableCS(&g_jq_cv, &g_sh_lock, g_pq_head ? 50 : INFINITE);

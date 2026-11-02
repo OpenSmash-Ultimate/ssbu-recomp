@@ -351,7 +351,7 @@ static void record_or_replay(uint64_t *buttons, int *lx, int *ly) {
     if (g_rec && g_anchor >= 0 && (*buttons != g_rec_buttons || *lx != g_rec_lx || *ly != g_rec_ly)) {
         g_rec_buttons = *buttons; g_rec_lx = *lx; g_rec_ly = *ly;
         fprintf(g_rec, "a %d %lld %llx %d %d\n", g_anchor, since, (unsigned long long)*buttons, *lx, *ly);
-        fflush(g_rec);
+        { int r1_on(void); if (!r1_on()) fflush(g_rec); }      /* rollback: a flush on the game thread waited ~300 ms on the disk mid-fight (sk1/sk2 stalls); the lines are written at exit */
     }
 }
 

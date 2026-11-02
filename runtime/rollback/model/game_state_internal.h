@@ -19,8 +19,11 @@
 #define PG 4096                              /* the page size every table here is counted in */
 #define WIN2 0x7100000000ull                 /* window 2: the guest image and the loaded modules start here ... */
 #define WN2 0x200000000ull                   /* ... and it is this many bytes long */
-#define LOG(...) do { fprintf(g_log, __VA_ARGS__); fflush(g_log); } while (0)      /* a line of the r1 log file */
+#define LOG(...) rb_log(__VA_ARGS__)          /* a line of the r1 log file */
 extern FILE *g_log;                          /* the r1 log file */
+void rb_log(const char *fmt, ...);          /* game_state.c: straight to g_log, or into memory while a rollback match is on (rb_log_async) */
+void rb_log_async(int on);                  /* on: LOG lines go to memory, a host thread writes them; off: the rest written now, then straight again */
+void rb_log_drain(void);                    /* write out what is in memory now (the crash filter) */
 
 /* A run of guest memory the save covers (a, n bytes), with its copy in the shadow (s) and per-page flags. */
 typedef struct { uint8_t *a; size_t n; uint8_t *s; uint8_t *dirty; uint8_t *learn; uint8_t *async; } Rng;   /* dirty / learn: one byte per page */
@@ -94,6 +97,7 @@ void sm_load(long long frame);               /* ... and the comparison at a load
 void sm_report(int final);                   /* ... the tables, every 100 loads and at the end */
 void ppool_init(void);
 void rg_audit(void);                         /* debug/ring_audit.c: after a capture, lists the pages that differ from the ring's newest value (SSBU_RB_AUDIT=<n>) */
+void rg_pagedump(long long frame);           /* debug/ring_audit.c: every saved page's hash after a capture, to a file (SSBU_RB_PAGEDUMP=<n>) */
 /* The extras' learned set (page_tracker_learned.c, "LS-X"): the ring asks which extras pages need comparing, and tells the set how each compare ended. */
 extern long long g_xls_caps, g_xls_jobs, g_xls_loads, g_xls_loadpages;      /* statistics: captures, pages compared, loads, pages loaded */
 int xls_skip(size_t e);                      /* 1 when extras page e was not written since the base, so it is neither compared nor loaded */
@@ -351,6 +355,7 @@ extern long long g_rg_freed_slots;    /* model/snapshot_ring.c */
 extern int g_rg_poolfix;    /* model/snapshot_ring.c */
 extern long long g_rg_need;    /* model/snapshot_ring.c */
 extern int g_rg_short;    /* model/snapshot_ring.c */
+extern long long g_rg_loading_until;    /* model/snapshot_ring.c */
 extern long long g_rg_short_n;    /* model/snapshot_ring.c */
 extern long long g_rg_tp_refused;    /* model/snapshot_ring.c */
 extern int g_rgs_left;    /* model/snapshot_ring.c */
@@ -384,6 +389,7 @@ void rbn_init(void);    /* controller/rollback_controller.c */
 int ra_wanted(void);    /* model/game_state.c */
 int r1_on(void);    /* model/game_state.c */
 int rw(DWORD p);    /* model/memory_map.c */
+extern int g_rs_direct;    /* model/memory_map.c: the ring base: no copy of the save of its own, mark_setup copies the live memory into the shadow (one copy, not two) */
 void *rs_alloc(size_t n);    /* model/memory_map.c */
 void rs_free(void *p);    /* model/memory_map.c */
 int rb_test_nomem(void);    /* model/memory_map.c */

@@ -315,6 +315,47 @@ static void print_build_identity(void) {
 #endif
 }
 
+/* (pf1) The lifted code is ~1.3 GB of DLLs (game library + nro_bin modules) that Windows reads from disk on the first call of
+ * each page. At fight start every new move then waits on the disk: 1-7 s freezes on a hard drive, both games of a PC at once
+ * (they share the pages). Read each module in ahead on a background-priority thread instead. SSBU_CODE_PREFETCH=0: off. */
+typedef BOOL (WINAPI *PrefetchFn)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+
+static DWORD WINAPI code_prefetch_thread(LPVOID arg) {
+    static PrefetchFn prefetch;
+    if (!prefetch) prefetch = (PrefetchFn)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "PrefetchVirtualMemory");
+    HMODULE m = (HMODULE)arg;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)m + ((const IMAGE_DOS_HEADER *)m)->e_lfanew);
+    WIN32_MEMORY_RANGE_ENTRY r = {m, nt->OptionalHeader.SizeOfImage};
+    char name[MAX_PATH] = "?";
+    GetModuleFileNameA(m, name, MAX_PATH);
+    const char *base = strrchr(name, '\\');
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);      /* low-priority I/O too: the game's own reads go first */
+    DWORD t0 = GetTickCount();
+    BOOL ok = prefetch && prefetch(GetCurrentProcess(), 1, &r, 0);
+    printf("code prefetch: %s, %.0f MB %s in %lu ms\n", base ? base + 1 : name, r.NumberOfBytes / 1048576.0, ok ? "read" : "NOT read", GetTickCount() - t0);
+    return 0;
+}
+
+void code_prefetch(HMODULE m) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_CODE_PREFETCH"); on = !(e && e[0] == '0'); }
+    if (on && m) { HANDLE t = CreateThread(NULL, 0, code_prefetch_thread, m, 0, NULL); if (t) CloseHandle(t); }
+}
+
+/* the exe and the game library (the big modules of the exe's folder; nro_bin modules are done by nnro.c as they load) */
+static void code_prefetch_boot(void) {
+    char exe[MAX_PATH], name[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH), need = 0;
+    while (n && exe[n - 1] != '\\') n--;
+    HMODULE mods[256];
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return;
+    for (DWORD i = 0; i < need / sizeof mods[0] && i < 256; i++) {
+        if (!GetModuleFileNameA(mods[i], name, MAX_PATH) || _strnicmp(name, exe, n) || strchr(name + n, '\\')) continue;
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)mods[i] + ((const IMAGE_DOS_HEADER *)mods[i])->e_lfanew);
+        if (nt->OptionalHeader.SizeOfImage >= (16u << 20)) code_prefetch(mods[i]);
+    }
+}
+
 /* SSBU_CRASH_TEST=<seconds>: a write to address 0 after that time, on a thread of its own: tries the whole crash path of a
  * PC (crash report, minidump) without waiting for a real crash. Test only. */
 static DWORD WINAPI crash_test(LPVOID arg) {
@@ -475,6 +516,7 @@ int main(int argc, char **argv) {
     check_romfs();
     runtime_init(g_elf, getenv("SSBU_TRACE") ? getenv("SSBU_TRACE") : "boot_trace.txt");
     if (getenv("SSBU_CRASH_TEST")) CloseHandle(CreateThread(NULL, 0, crash_test, NULL, 0, NULL));
+    code_prefetch_boot();
     register_imports(base_imports, (int)(sizeof base_imports / sizeof base_imports[0]));
     register_sdk_imports();
     register_cxx_imports();

@@ -150,7 +150,7 @@ Replaces the marks on the normal game build. Its header explains it in full; in 
 4. Host code that writes guest memory through the kernel cannot fault: it calls `r1_wrote` first (`ls_range`). A
    decommit makes the pages learned; a commit during a fight makes new pages read-only.
 5. At the end of a fight everything is writable again; the next base starts with an empty set.
-6. `SSBU_LS_DECAY=<n>` (default off): pages unchanged for `n` captures go read-only again.
+6. `SSBU_LS_DECAY=<n>` (default 16 since rb6, `=0` off): pages unchanged for `n` captures go read-only again.
 
 It also holds the **presentation pool** (hooks on the game's jemalloc entry points for three allocation sites that
 are not simulation state).

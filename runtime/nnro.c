@@ -415,6 +415,7 @@ static int cmp_host(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
+void code_prefetch(HMODULE m);                               /* boot.c: read a module's code in ahead (pf1) */
 void sky_site_inline(Ctx *c, uint64_t pc);                   /* skyline.c (included below) */
 int sky_site_midhook(Ctx *c, uint64_t pc);
 static const NroHost g_host = {call_indirect, host_import, guest_trap, guest_unimpl, guest_svc, stx_diag, nro_import_host, nro_catch_call, sky_site_inline, sky_site_midhook};
@@ -458,6 +459,7 @@ static int attach_dll(NroModule *m) {
     memcpy(m->by_host, m->fns, (size_t)m->fn_count * sizeof *m->by_host);
     qsort(m->by_host, (size_t)m->fn_count, sizeof *m->by_host, cmp_host);
     m->dll = dll;
+    code_prefetch(dll);
     return 1;
 }
 
@@ -754,6 +756,8 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
     c->x[0] = RO_OK;
 }
 
+/* (rb5) rollback_controller.c: a lua2cpp_* module unloaded = the results screen of a match was left (its fighters go) */
+volatile long g_ro_script_unloads;
 static void ro_UnloadModule(Ctx *c) {            /* (Module *) */
     uint64_t g = c->x[0], obj = rd64(g);
     NroModule *m = obj ? module_at(obj) : NULL;
@@ -778,6 +782,7 @@ static void ro_UnloadModule(Ctx *c) {            /* (Module *) */
     ReleaseSRWLockExclusive(&g_ro_lock);
     wr32(g + 8, 0);
     printf("nn::ro::UnloadModule: %s\n", m->info->name);
+    if (!strncmp(m->info->name, "lua2cpp_", 8)) InterlockedIncrement(&g_ro_script_unloads);
     trace_printf("nn::ro::UnloadModule: %s\n", m->info->name);
 }
 

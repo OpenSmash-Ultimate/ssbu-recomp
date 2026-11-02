@@ -474,6 +474,9 @@ static const char *ip_text(uint32_t ip, char *b);
 static volatile uint32_t g_rb_match_peer;              /* (R3 net3) the opponent of the last rollback-match search (lobby 1.4), 0 = none */
 static volatile LONG64 g_rb_rx_other;                  /* (R3 net3) rollback messages from another player than that opponent: dropped */
 static volatile LONG g_rb_nodst; static volatile uint32_t g_rb_dst_said;
+#define T_RB_DIRECT 22                                 /* (rb2) a rollback message over a direct path: 'S' 'U' 1 22 | secret u64 | source u32 | message */
+static volatile uint32_t g_rb_direct_from; static volatile LONG64 g_rb_direct_ms;     /* the game last heard direct, and when */
+static volatile LONG64 g_rb_out_direct, g_rb_out_relay, g_rb_in_direct, g_rb_in_relay;
 int net_rb_no_destination(void) { return g_rb_nodst; }
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
@@ -482,10 +485,29 @@ int net_rb_send(const void *p, int n) {
     if (!dst) dst = g_rb_peer;
     if (!dst && g_mode == NET_MODE_LOBBY && !_stricmp(g_code, "public")) { InterlockedIncrement(&g_rb_nodst); return 0; }
     if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), room ? "the other player of this Local Wireless room" : dst == g_rb_match_peer ? "the opponent the lobby found" : "the game that wrote to this one"); fflush(stdout); }
+    /* (rb2, testers 2026-10-30: direct path 47 ms, round trip through the lobby 230 ms) straight to the other player while a
+     * direct path is up; through the lobby as well until that game is heard direct (an rb1 game drops this packet type) */
+    struct sockaddr_in at; uint64_t secret = 0; int direct = 0;
+    if (dst && g_direct) {
+        uint64_t t = ms_now();
+        AcquireSRWLockShared(&g_peers_lock);
+        for (int i = 0; i < g_npeers; i++)
+            if (g_peers[i].ip == dst && fresh(&g_peers[i], t)) { at = g_peers[i].cand[g_peers[i].via].at; secret = g_peers[i].secret; direct = 1; break; }
+        ReleaseSRWLockShared(&g_peers_lock);
+    }
     uint8_t b[1500];
-    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
-    memcpy(b + 16, p, (size_t)n);
-    tx(b, 16 + n, &g_lobby);
+    if (direct) {
+        hdr(b, T_RB_DIRECT); s64(b + 4, secret); s32(b + 12, g_ip);
+        memcpy(b + 16, p, (size_t)n);
+        tx(b, 16 + n, &at);
+        InterlockedIncrement64(&g_rb_out_direct);
+    }
+    if (!direct || dst != g_rb_direct_from || ms_now() - (uint64_t)g_rb_direct_ms > FRESH_MS) {
+        hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
+        memcpy(b + 16, p, (size_t)n);
+        tx(b, 16 + n, &g_lobby);
+        InterlockedIncrement64(&g_rb_out_relay);
+    }
     return 1;
 }
 
@@ -585,6 +607,9 @@ static void peers_tick(uint64_t t) {
     }
     ReleaseSRWLockExclusive(&g_peers_lock);
     for (int i = 0; i < nl; i++) say("%s", lines[i]);
+    if (last_report == t && (g_rb_out_direct || g_rb_out_relay))       /* (rb2) with the traffic line */
+        say("rollback messages: out %lld direct + %lld relayed, in %lld direct + %lld relayed", (long long)g_rb_out_direct,
+            (long long)g_rb_out_relay, (long long)g_rb_in_direct, (long long)g_rb_in_relay);
 }
 
 /* (peers lock held) the introduced player whose secret this is, if it came from one of its addresses */
@@ -615,6 +640,20 @@ static void from_player(const uint8_t *p, int n, const struct sockaddr_in *from)
             InterlockedIncrement64(&g_in_direct);
             nnldn_deliver(src, sport, dst, dport, b + 12, (uint32_t)(n - 24));
         }
+        return;
+    }
+    if (p[3] == T_RB_DIRECT && n > 16) {
+        uint32_t src = g32(p + 12), mp = g_rb_match_peer;
+        AcquireSRWLockShared(&g_peers_lock);
+        Peer *q = peer_at(secret, from, &c);
+        int ok = q && q->ip == src;
+        ReleaseSRWLockShared(&g_peers_lock);
+        if (!ok || src == g_ip) return;
+        if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); return; }     /* as T_RB */
+        if (src != g_rb_direct_from) { char a[16]; printf("[rbnet] rollback messages from %s arrive direct: no longer through the lobby\n", ip_text(src, a)); fflush(stdout); }
+        g_rb_direct_from = src; InterlockedExchange64(&g_rb_direct_ms, (LONG64)t);
+        InterlockedIncrement64(&g_rb_in_direct);
+        g_rb_peer = src; rbn_rx(p + 16, n - 16);
         return;
     }
     if (p[3] != T_PUNCH || n < 29) return;
@@ -1484,7 +1523,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         case T_RB:                                       /* R3: a rollback message of the other player */
             if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
                 if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
-                if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
+                if (src && src != g_ip) { g_rb_peer = src; InterlockedIncrement64(&g_rb_in_relay); rbn_rx(buf + 8, n - 8); } }
             break;
         }
     }

@@ -173,14 +173,15 @@ int mark_setup(void) {
                 uint8_t *a = r->a + p * PG, *cm; size_t pi; uint8_t *sh = in_shadow(a, &cm, &pi);
                 if (sh) {
                     if (!sh_commit(sh, cm, pi)) { LOG("r1: MARK setup: commit of the shadow FAILED after %.1f MB%s: marks OFF\n", shb / 1048576.0, rb_test_nomem() == 4 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=4)" : ""); mark_undo(); return 0; }
-                    memcpy(sh, r->s + p * PG, PG); shb += PG;
+                    if (r->s) memcpy(sh, r->s + p * PG, PG); else cp_add(sh, a); shb += PG;
                 } else {
                     if (cx < g_nx && xo == g_x[cx].n) { cx++; xo = 0; }
-                    if (cx < g_nx && g_x[cx].a + xo == a) { memcpy(g_x[cx].b + xo, r->s + p * PG, PG); xo += PG; }
+                    if (cx < g_nx && g_x[cx].a + xo == a) { if (r->s) memcpy(g_x[cx].b + xo, r->s + p * PG, PG); else cp_add(g_x[cx].b + xo, a); xo += PG; }
                 }
-                if (g_rs_drop && (p + 1 - d0 == 256 || p + 1 == np)) { VirtualFree(r->s + d0 * PG, (p + 1 - d0) * PG, MEM_DECOMMIT); dropped += (long long)(p + 1 - d0); d0 = p + 1; }
+                if (g_rs_drop && r->s && (p + 1 - d0 == 256 || p + 1 == np)) { VirtualFree(r->s + d0 * PG, (p + 1 - d0) * PG, MEM_DECOMMIT); dropped += (long long)(p + 1 - d0); d0 = p + 1; }
             }
         }
+        cp_run();                                       /* (direct base save) the live pages, copied by the pool's threads: the game is held */
         if (g_rs_drop) LOG("r1: MARK setup: the copy of the full save given back while the shadow took it (%.1f MB): peak commit ~one copy\n", dropped * (double)PG / 1048576.0);
     }
     uint8_t *m1 = VirtualAlloc(NULL, g_wn1 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);

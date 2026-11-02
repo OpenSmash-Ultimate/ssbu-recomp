@@ -77,6 +77,7 @@ static int rg_vcom(uint8_t *base, size_t *com, size_t need, size_t step) {   /* 
  *  - the ring full with its oldest slot the only one at or before g_rg_need: the capture is skipped instead of dropping it.
  * Test (forces it): SSBU_RB_NET_TEST_POOL=<from frame>,<frames>[,<mode>]: captures of those frames get at most 64 buffers;
  * mode 1 (default): then only buffers given back to the pool, 2: none at all. */
+long long g_rg_loading_until = -1;
 long long g_rg_need = -1; int g_rg_poolfix = -1, g_rg_short; long long g_rg_short_n, g_rg_freed_slots, g_rg_skip_full;
 static long long g_rg_tp_f = -2, g_rg_tp_n; static int g_rg_tp_mode, g_rg_tp_active, g_rg_tp_gets; long long g_rg_tp_refused;
 static uint32_t rg_pool_get(void) {
@@ -483,12 +484,15 @@ int r1_ring_capture(long long frame, Ctx *c) {
         g_rgp_seg = seg_was;
         if (g_rg_nomem) return 0;                         /* (hs13) out of memory: not tried again in this match */
         g_save_failed = 0; g_ra_wd_pause = 1; g_rs_drop = 1;
-        save(c); release(); g_rs_drop = 0;
+        { const char *e = getenv("SSBU_RB_BASE_DIRECT"); g_rs_direct = !(e && e[0] == '0'); }     /* (one copy of the memory, not two: about half the match-start hitch) */
+        if (g_rs_direct) cp_init();     /* the copy threads, made before the game is held (mark_setup copies through them) */
+        save(c); release(); g_rs_drop = 0; g_rs_direct = 0;
         g_ra_wd_pause = 0;
         if (g_save_failed == 2) { g_rg_nomem = 1; LOG("r1: RING: the base state was NOT made (out of memory: free commit %.0f MB, needed %.0f MB + 1024 MB left for the game): no rollback ring\n", g_save_avail_mb, g_save_need_mb); return 0; }
         if (g_save_failed) return 0;
         g_ra_ready = 1; g_session.cycle = 1;
         if (g_mark <= 0) { g_ra_off = 1; LOG("r1: RING: no marks (the game DLL with marks is not loaded): OFF\n"); return 0; }
+        double ti0 = now_ms();
         if (!rg_init()) { g_rg_nomem = 2; if (!rbg_on()) g_ra_off = 1; LOG("r1: RING: its own allocations FAILED (out of memory): no rollback ring for the rest of this session\n"); return 0; }
         g_rg_ready = 1;
         {   const char *e = getenv("SSBU_RB_AUDIO_OFF");              /* the audio threads stop for the rest of the fight (hostrt.c rb_audio_off_gate) */
@@ -496,7 +500,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         RgSlot *s = &g_rg[0]; g_rg_head = 0; g_rg_count = 1;
         s->frame = frame; s->nent = 0;
         rg_meta_capture(s, &g_ctx_save);
-        LOG("r1: RING: base state (frame %lld): full save in %.1f ms\n", frame, now_ms() - t0);
+        LOG("r1: RING: base state (frame %lld): full save in %.1f ms (ring setup %.1f ms of it)\n", frame, now_ms() - t0, now_ms() - ti0);
         return 1;
     }
     if (g_rg_poolfix < 0) { const char *e = getenv("SSBU_RB_POOLFIX"); g_rg_poolfix = !(e && e[0] == '0'); }
@@ -507,7 +511,12 @@ int r1_ring_capture(long long frame, Ctx *c) {
         if (g_rg_skip_full <= 10) LOG("r1: RING: capture at frame %lld skipped: the ring is full and its oldest state (frame %lld) is the newest one at or before frame %lld, which a rollback may still need\n", frame, rg_slot(0)->frame, g_rg_need);
         return 0;
     }
-    if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: thread %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy ? g_ra_busy : "?", g_rg_park_ms); return 0; }
+    if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++;
+        /* (lo16j) ResLoadingThread busy at the match end: a load a few frames later found it moved on to another wait, the memory went
+         * back under it and the game died after 9 s of fault recovery. A thread that is neither audio nor a task worker not at a wait
+         * means the game is loading: no frame on a guess for a while (the controller), so no rollback has to cross the load */
+        if (g_ra_busy && !strstr(g_ra_busy, "TaskWorker") && !strstr(g_ra_busy, "job fiber") && !strstr(g_ra_busy, "nus3::audio") && !strstr(g_ra_busy, "sindou") && !strstr(g_ra_busy, "AudioDevice")) g_rg_loading_until = frame + 30;
+        if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: thread %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy ? g_ra_busy : "?", g_rg_park_ms); return 0; }
     double t1 = now_ms();
     if (g_rg_count == g_rg_cap) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     RgSlot *s = rg_slot(g_rg_count);
@@ -548,6 +557,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
     }
     g_rg_short = 0;
     rg_audit();                                             /* (debug, SSBU_RB_AUDIT) pages the capture should have taken and did not */
+    rg_pagedump(frame);                                     /* (debug, SSBU_RB_PAGEDUMP) every page's hash, to compare two online games */
     double t3 = now_ms();
     ls_after_capture();                                     /* R4 (SSBU_LS_DECAY) */
     fibers_save(); double t3a = now_ms();
@@ -566,6 +576,8 @@ int r1_ring_capture(long long frame, Ctx *c) {
         while (g_rg_count > 1) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     }
     g_rg_last[0] = t5 - t0; g_rgp_seg = seg_was;
+    {   static int nslow; if (t5 - t0 > 40 && ++nslow <= 40) LOG("r1: RING: SLOW capture at frame %lld: %.1f ms: hold %.1f, sweep %.1f (pages %u + extras %u), copy %.1f, fibers %.1f, command buffers %.1f, rest %.1f\n",
+        frame, t5 - t0, t1 - t0, t2 - t1, (unsigned)s->pages, (unsigned)s->xpages, t3 - t2, t3a - t3, t3b - t3a, t5 - t3b); }
     if (g_rgc_n < RG_NST) { int i = g_rgc_n++; g_rgc[0][i] = t5 - t0; g_rgc[1][i] = t1 - t0; g_rgc[2][i] = t2 - t1; g_rgc[3][i] = t3 - t2; g_rgc[4][i] = (t4 - t3) + (t5 - t4); g_rgc_pg[i] = s->pages; g_rgc_xp[i] = s->xpages; }
     return 1;
 }

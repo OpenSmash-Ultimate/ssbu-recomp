@@ -84,7 +84,7 @@ static void rbg_fallback_watch(void) {
 }
 static long long g_rbg_fb_at = -1;                       /* the frame where the fallback was made (-1 = rollback is on, or it was off from the start of the match) */
 static int g_rbg_fb_n;                                    /* fallbacks in this match */
-enum { RBG_FB_RETRY_FRAMES = 900, RBG_FB_MAX = 3 };       /* frames to wait before trying rollback again (x the number of fallbacks: 15 s, 30 s, 45 s at 60 fps); fallbacks after which it stays off */
+enum { RBG_FB_RETRY_FRAMES = 900, RBG_FB_MAX = 3, RBG_FB_EARLY = 300, RBG_FB_EARLY_RETRY = 120 };       /* frames to wait before trying rollback again (x the number of fallbacks: 15 s, 30 s, 45 s at 60 fps); fallbacks after which it stays off */
 /* Zeroes the failure counters (a match starts, or rollback has just come back). */
 static void rbg_fallback_counters(void) { g_rbg_fb_why = NULL; g_rbg_fb_refused0 = g_rg_refused; g_rbg_fb_caps = g_rg_caps; g_rbg_fb_fail = g_rg_cap_fail; g_rbg_fb_run = 0; }
 /* Starts a match with the failure counters at zero and no fallback made yet. */
@@ -107,7 +107,10 @@ static void rbg_fallback_go(long long frame) {
  * the match stays delay-only: if the cause is still there, going back and forth would only make hitches (each rebase costs about a second). */
 static void rbg_fallback_try_recover(long long i, Ctx *c) {
     if (g_rbg_fb_at < 0 || g_rbg_fb_n >= RBG_FB_MAX || g_rg_nomem) return;
-    if (i - g_rbg_fb_at < (long long)RBG_FB_RETRY_FRAMES * g_rbg_fb_n) return;
+    /* (jl1) a fallback in the first seconds of the fight is the fight-start file loading (ResLoadingThread in ReadFile refuses every
+     * load); that is over within a few seconds, and waiting 15 s left a lossy match delay-only (509 stalls). Retry after 2 s then. */
+    long long wait = g_rbg_fb_n == 1 && g_rbg_fb_at < RBG_FB_EARLY ? RBG_FB_EARLY_RETRY : (long long)RBG_FB_RETRY_FRAMES * g_rbg_fb_n;
+    if (i - g_rbg_fb_at < wait) return;
     if (rbn_confirmed() < i) return;
     double t0 = now_ms();
     if (!r1_ring_rebase(i, c)) return;
@@ -168,7 +171,8 @@ static long long g_rbg_short_waits;
 static int g_rbg_pend, g_rbg_refused_tick;
 void rbn_put_mismatch(int m);
 int rb_maybe_rebase(long long i, Ctx *c);      /* snapshot_ring.c (OPTION 1) */
-static int rbg_capture(long long i, Ctx *c) { g_rg_need = rbn_confirmed(); if (g_rbg_pend > 0 && g_rbg_pend - 1 < g_rg_need) g_rg_need = g_rbg_pend - 1; return r1_ring_capture(i, c); }
+static double g_rbg_tick_cap;                          /* capture ms in this tick (the SLOW TICK line) */
+static int rbg_capture(long long i, Ctx *c) { g_rg_need = rbn_confirmed(); if (g_rbg_pend > 0 && g_rbg_pend - 1 < g_rg_need) g_rg_need = g_rbg_pend - 1; double t = now_ms(); int r = r1_ring_capture(i, c); g_rbg_tick_cap += now_ms() - t; return r; }
 void rbn_stats(int *delay, int *last, int *maxk) { *delay = rbn_delay(); *last = (int)g_rbg_last_k; *maxk = (int)g_rbg_max_k; }   /* net_relay.c net_stats_get (F2) */
 
 static void rbg_wait_until(double t) {                  /* a high-resolution timer for the long part, a spin for the last 0.3 ms */
@@ -248,6 +252,7 @@ static void rbg_step_body(Ctx *c) {
         }
         if (g_rbg_wdfix) g_ra_wd_pause = 1;
         g_rbg_in_match = 1;
+        rb_log_async(1);                                /* (ot2) no LOG line waits on the disk during the fight (game_state.c rb_log) */
         if (i > 0) LOG("r1: RB NET: the base state was made %lld passes after the first safe point with the fight on (fight frame %lld): it is frame %lld, as on the other game (net3)\n", i, g_rbg_ff_first, i);
         rbn_start(i);
         rbn_pass_hash(0);                               /* (hs12) the checksum of frame 1 starts here (run tw8: frame-line lines from before the base, a different number on the two games, made frame 1 of match 2 differ) */
@@ -284,6 +289,7 @@ static void rbg_step_body(Ctx *c) {
         long long best;
         if (!g_rbg_noring && rb_fault_recover(i, c, &best)) {
             int k = (int)(i - best);
+            rbn_pass_hash(0);                           /* (lo1) drops the faulted pass's frame lines: they leaked into the checksum of the pass after the load */
             g_rbg_pend = 0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
             g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2; g_rbg_cur_k = k;
             return;
@@ -359,7 +365,9 @@ static void rbg_step_body(Ctx *c) {
     }
     /* the next pass is a real one (frame i + 1): pending wrong guesses first, then the other player, then the tick */
     double tw = now_ms();
-    if (g_rbg_tick0 > 0 && g_rbg_nw < RBG_NT) { g_rbg_work[g_rbg_nw] = (float)(tw - g_rbg_tick0); g_rbg_wcyc[g_rbg_nw] = (float)((rgs_cyc_now() - g_rbg_cyc_go) / 1e6); g_rbg_wk[g_rbg_nw] = (unsigned char)(g_rbg_tick_k > 255 ? 255 : g_rbg_tick_k); g_rbg_nw++; }
+    if (g_rbg_tick0 > 0 && g_rbg_nw < RBG_NT) { g_rbg_work[g_rbg_nw] = (float)(tw - g_rbg_tick0); g_rbg_wcyc[g_rbg_nw] = (float)((rgs_cyc_now() - g_rbg_cyc_go) / 1e6); g_rbg_wk[g_rbg_nw] = (unsigned char)(g_rbg_tick_k > 255 ? 255 : g_rbg_tick_k); g_rbg_nw++;
+        {   static long long nslow; float w = g_rbg_work[g_rbg_nw - 1];      /* the hitches one by one (wall vs main-thread CPU: waiting or working) */
+            if (w > 50 && ++nslow <= 40) LOG("r1: RB NET SLOW TICK at frame %lld: %.1f ms (main-thread CPU %.1f M cycles), %d frames again, capture %.1f ms\n", i, w, g_rbg_wcyc[g_rbg_nw - 1], g_rbg_tick_k, g_rbg_tick_cap); } }
     g_rbg_tick0 = 0;
     int stalled = 0; double ts = 0;
     for (;;) {
@@ -370,7 +378,7 @@ static void rbg_step_body(Ctx *c) {
         rbg_fallback_watch();                       /* failures piling up: no rollback for the rest of the match, once no guess is outstanding */
         if (g_rbg_fb_why && !g_rbg_noring && m == 0 && rbn_confirmed() >= i) rbg_fallback_go(i);
         /* (hs14) the ring short of pool memory (its last capture given up): no frame on a guess until a capture succeeds */
-        if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring || g_rg_short ? 0 : rbn_ahead())) break;
+        if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring || g_rg_short || g_rgs_next <= g_rg_loading_until ? 0 : rbn_ahead())) break;
         if (!g_rbg_noring && g_rg_short && g_rgs_next - rbn_confirmed() <= rbn_ahead() && !stalled) g_rbg_short_waits++;
         if (rbn_peer_gone()) { if (!g_rbg_gone++) LOG("r1: RB NET: no message from the other player for 5 s at frame %lld: going on alone (guesses)\n", i); break; }
         if (!stalled) { stalled = 1; ts = now_ms(); g_rbg_stalls++; r1_ring_let_go(); }
@@ -393,7 +401,7 @@ static void rbg_step_body(Ctx *c) {
     }
     double go = now_ms();
     if (g_rbg_last_go > 0 && g_rbg_ng < RBG_NT) g_rbg_gap[g_rbg_ng++] = (float)(go - g_rbg_last_go);
-    g_rbg_last_go = go; g_rbg_tick0 = go; g_rbg_tick_k = 0; g_rbg_cyc_go = rgs_cyc_now();
+    g_rbg_last_go = go; g_rbg_tick0 = go; g_rbg_tick_k = 0; g_rbg_tick_cap = 0; g_rbg_cyc_go = rgs_cyc_now();
     if (g_rbg_real % 600 == 0) LOG("r1: RB NET: frame %lld: %lld rollbacks (%lld frames again), %lld stalls (%.0f ms), round trip %d ms, delay %d, remote pads up to %lld, clock ahead of the other game by %.1f ms\n",
                                    i, g_rbg_rb, g_rbg_rerun, g_rbg_stalls, g_rbg_stall_ms, rbn_rtt_ms(), rbn_delay(), rbn_confirmed(), rbn_offset_ms());
 }
@@ -439,24 +447,30 @@ void rbg_step(Ctx *c) {
  * port 2 too (its card closes with ours), at most RBG_AFTER_PRESSES times, for RBG_AFTER_MS, and never once the next match
  * is on. Only A: port 2's stick and other buttons stay idle (on the character select they would act for player 2).
  * SSBU_RB_NET_AFTER=0: off. (v13, owner 2026-10-28: with 3 presses the A's pressed through "GAME!" and the winner's
- * animation used them all up before the cards came: 10 presses and 60 s; each press given is logged with its time.) */
+ * animation used them all up before the cards came: 10 presses and 60 s; each press given is logged with its time.)
+ * (rb5, owner 2026-10-30: "the game wont let me continue": runs 211234 and 213738 used the 10 presses up by 7 s, before
+ * port 2's card came, and that side stayed on the results; in 214411 presses 8 and 9 landed on the room screen) no count any
+ * more: every A until the results screen is left (nnro.c: a lua2cpp_* module unloaded, the fighters going), at most 60 s. */
 #define RBG_AFTER_MS 60000.0
-#define RBG_AFTER_PRESSES 10
-static double g_rbg_after_t0; static int g_rbg_after_n, g_rbg_after_hold, g_rbg_after_down, g_rbg_after_polls;
+static double g_rbg_after_t0; static int g_rbg_after_n, g_rbg_after_hold, g_rbg_after_down, g_rbg_after_polls; static long g_rbg_after_unloads;
+extern volatile long g_ro_script_unloads;                                                                   /* nnro.c */
 static void rbg_after_begin(void) {
     const char *e = getenv("SSBU_RB_NET_AFTER");
     if (e && e[0] == '0') return;
     g_rbg_after_t0 = now_ms(); g_rbg_after_n = g_rbg_after_hold = g_rbg_after_polls = 0; g_rbg_after_down = 1;      /* (an A held at the end of the fight is not a press) */
-    LOG("r1: RB NET: results screen: player 2's card is closed with player 1's A (at most %d presses, %.0f s)\n", RBG_AFTER_PRESSES, RBG_AFTER_MS / 1000.0);
+    g_rbg_after_unloads = g_ro_script_unloads;
+    LOG("r1: RB NET: results screen: player 2's card is closed with player 1's A (every A until the fighters are unloaded, at most %.0f s)\n", RBG_AFTER_MS / 1000.0);
 }
 static int rbg_after(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {   /* 1 = port id's pad was given */
-    if (now_ms() - g_rbg_after_t0 > RBG_AFTER_MS || rbn_started() || (g_rbg_after_n >= RBG_AFTER_PRESSES && !g_rbg_after_hold)) {
-        LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done\n", g_rbg_after_n, g_rbg_after_polls);
+    int left = g_ro_script_unloads != g_rbg_after_unloads;
+    if (now_ms() - g_rbg_after_t0 > RBG_AFTER_MS || rbn_started() || left) {
+        LOG("r1: RB NET: results screen: player 2's A given %d times (port 2 read %d times with A down), done at %.1f s (%s)\n", g_rbg_after_n, g_rbg_after_polls,
+            (now_ms() - g_rbg_after_t0) / 1000.0, left ? "the fighters were unloaded: the results screen was left" : rbn_started() ? "the next match is on" : "time-out");
         g_rbg_after_t0 = 0; return 0;
     }
     if (id == 0) {
         int down = (*b & 1) != 0;                       /* A (nnhid.c BTN_A) */
-        if (down && !g_rbg_after_down && g_rbg_after_n < RBG_AFTER_PRESSES) {
+        if (down && !g_rbg_after_down) {
             g_rbg_after_n++; g_rbg_after_hold = 6;
             LOG("r1: RB NET: results screen: A %d of player 1 at %.1f s after the match: given to player 2 too\n", g_rbg_after_n, (now_ms() - g_rbg_after_t0) / 1000.0);
         }
@@ -511,6 +525,7 @@ void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
  * emptied, the session reset for the next match (whose first safe point makes the ring's base again: r1_ring_rebase) */
 void rbg_fight_off(void) {
     if (!g_rbg_in_match) return;
+    rb_log_async(0);                                    /* the fight's lines written out first, then the report straight */
     rb_fault_report();                                  /* once per match: the safety net and the quiet states (fault_recovery.c, snapshot_ring.c) */
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; rbg_after_begin(); }
     else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
@@ -522,7 +537,7 @@ void rbg_fight_off(void) {
     g_rbg_in_match = 0; g_rbg_ff_first = -1;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;
     g_rbg_stall_ms = g_rbg_load_ms = g_rbg_tick0 = g_rbg_next = g_rbg_last_go = 0;
-    g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
+    g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_loading_until = -1; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
     g_rbg_t_pre = g_rbg_t_load = g_rbg_t_rerun = g_rbg_t_recap = g_rbg_t_pass0 = 0; g_rbg_n_rerun = g_rbg_n_recap = 0;
     g_rbg_wd_before = g_ra_wd_fired;
     g_rbg_pend = 0;
