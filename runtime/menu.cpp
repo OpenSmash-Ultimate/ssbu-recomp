@@ -863,6 +863,37 @@ static int ini_read(const char *key, char *out, int n) {       /* "key = value" 
     return found;
 }
 static int off_word(const char *v) { return !*v || !strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "no") || !_stricmp(v, "false"); }
+/* rollback = on in graphics.ini, read as scripts/run.py ini_on reads it (on / 1 / yes / true): the launcher starts the game with
+ * SSBU_RB_NET=net then */
+static int rollback_ini_on(void) {
+    char v[16];
+    return ini_read("rollback", v, sizeof v) && (!_stricmp(v, "on") || !strcmp(v, "1") || !_stricmp(v, "yes") || !_stricmp(v, "true"));
+}
+/* (2026-11-02, Linux vs Windows test: "rollback on in both games", yet the room match said "the other player's game has rollback
+ * off") "Restart the game now" starts this exe again with the SAME environment: SSBU_RB_NET comes from the launcher (run.py), so
+ * turning rollback on in F1 and restarting from here left it off (and turning it off left it on). The restart now sets it as the
+ * launcher would; a value other than the launcher's "net" (tests: loop, a forced player) is kept. */
+static void restart_rollback_env(void) {
+#ifndef __APPLE__
+    const char *e = getenv("SSBU_RB_NET");
+    int on = rollback_ini_on();
+    if (on && !(e && *e)) {
+        printf("menu: restart: rollback = on in graphics.ini: SSBU_RB_NET=net\n");
+#ifdef _WIN32
+        _putenv("SSBU_RB_NET=net"); SetEnvironmentVariableA("SSBU_RB_NET", "net");
+#else
+        setenv("SSBU_RB_NET", "net", 1);
+#endif
+    } else if (!on && e && !strcmp(e, "net")) {
+        printf("menu: restart: rollback = off in graphics.ini: SSBU_RB_NET removed\n");
+#ifdef _WIN32
+        _putenv("SSBU_RB_NET="); SetEnvironmentVariableA("SSBU_RB_NET", NULL);
+#else
+        unsetenv("SSBU_RB_NET");
+#endif
+    }
+#endif
+}
 static void online_init(void) {
     char v[128];
     memset(&O, 0, sizeof O);
@@ -922,6 +953,7 @@ static void restart_game(void) {
     GetCurrentDirectoryW(MAX_PATH, dir);
     swprintf(pid, 16, L"%lu", GetCurrentProcessId());
     SetEnvironmentVariableW(L"SSBU_RESTART_WAIT_PID", pid);
+    restart_rollback_env();
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si); si.cb = sizeof si;
@@ -977,6 +1009,7 @@ static void restart_game(void) {                           /* this exe again, sa
     char pid[16], exe[MAX_PATH], path[MAX_PATH];
     snprintf(pid, sizeof pid, "%d", (int)getpid());
     setenv("SSBU_RESTART_WAIT_PID", pid, 1);
+    restart_rollback_env();
     GetModuleFileNameA(NULL, exe, MAX_PATH);
     plat_path(exe, path, sizeof path);
     printf("menu: restarting the game: %s\n", path);
@@ -1023,6 +1056,7 @@ static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF
     return c && enabled;
 }
 static int online_differs(void);
+static int rb_restart;                     /* the rollback switch differs from this run (the restart applies it) */
 static void sec_experimental(void) {
     if (!g_online_inited) online_init();
     help("Features still being tested. Each is saved to config\\graphics.ini and used from the next start.");
@@ -1088,9 +1122,12 @@ static void sec_experimental(void) {
         if (rb_have) ImGui::TextDisabled("smooth online fights at high ping (experimental); both players need it on");
         else ImGui::TextDisabled("not in the Linux / macOS build yet");
         if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
+        else if (rb_have && rb_on && rb_on == rb_on0)       /* (on in the file, yet this run was started without it: not by the launcher) */
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Rollback is on in the settings but NOT active in this run: start the game with its launcher, or Restart below.");
+        rb_restart = rb_on != rb_on0 || (rb_have && rb_on && !getenv("SSBU_RB_NET"));
         sec_online();
     }
-    if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0)) {
+    if (online_differs() || rb_restart || S.runahead != S0.runahead || strcmp(pname, pname0)) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
         if (ImGui::Button("Restart the game now")) restart_game();
