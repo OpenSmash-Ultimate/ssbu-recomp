@@ -179,7 +179,7 @@ static void rbg_step_body(Ctx *c) {
                 rbg_wait_until(now_ms() + 1.0);
             }
             rbn_hello(); rbn_choose_delay();
-            if (i > rbn_delay()) LOG("r1: RB NET: WARNING: the base state is frame %lld, later than the input delay (%d): the other player's first pads may differ (desync risk)\n", i, rbn_delay());
+            if (i > (rbn_delay() > RB_LEADIN ? rbn_delay() : RB_LEADIN)) LOG("r1: RB NET: WARNING: the base state is frame %lld, later than the empty first frames (input delay %d, at least RB_LEADIN): the other player's first pads may differ (desync risk)\n", i, rbn_delay());
             LOG("r1: RB NET: start barrier: the other game %s after %.0f ms\n", rbn_peer_started() ? "is in the match" : "DID NOT ANSWER (going on)", now_ms() - tb);
         }
         if (g_rbg_noring && rbn_loop()) {               /* (hs13) loop test: the bot's pads start at frame 1 (on a network frames 1..delay are empty on both sides) */

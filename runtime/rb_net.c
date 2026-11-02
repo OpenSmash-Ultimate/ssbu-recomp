@@ -10,10 +10,11 @@
  *   SSBU_RB_NET=loop[,<f>] one game: the other player is a bot whose pads "arrive" <f> frames late (default 4):
  *                          rollback without a network, for the determinism proof (f = 0: never late = reference)
  *   SSBU_RB_NET_PLAYER=0|1 this game's player (default: 0, 1 in SSBU_ONLINE=join mode)
- *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: from the measured round trip, 1..4)
+ *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default with the snapshot ring: 0 while SSBU_RB_NET_AHEAD covers the trip,
+ *                          then 1 per frame short; auto = the old choice from the measured round trip, 1..4)
  *   SSBU_RB_NET_BOT=<seed> the local player's pads come from a test bot instead of the controller / input sequence
  *   SSBU_RB_NET_LOG=<file> one line per finalized frame: "f <frame> h <checksum>" (compare two games' files)
- *   SSBU_RB_NET_AHEAD=<n>  most frames this game runs ahead of the newest remote pad (default 7 = the ring depth)
+ *   SSBU_RB_NET_AHEAD=<n>  most frames this game runs ahead of the newest remote pad (default 5; at most 7 = the ring depth)
  *   SSBU_RB_NET_FIND=0     (R3 net3) no opponent search through the lobby (lobby / LAN mode without a room: the old way)
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include <windows.h>
@@ -38,7 +39,7 @@ int net_rb_no_destination(void);                       /* net_relay.c (pub1): me
 int net_mode(void);
 int net_online(void);
 
-static int g_on = -1, g_loop, g_loop_lat = 4, g_local, g_delay_cfg = -1, g_ahead = 7, g_started, g_peer_started;
+static int g_on = -1, g_loop, g_loop_lat = 4, g_local, g_delay_cfg = -2, g_ahead = 5, g_started, g_peer_started;
 static unsigned g_bot_seed; static int g_bot;
 static FILE *g_hlog;
 static volatile LONG64 g_cur;                          /* the frame this game is on (read by the receive thread for PONGs) */
@@ -54,11 +55,11 @@ int rbn_on(void) {
     g_local = 0;
     if (!g_loop && net_online() && net_mode() == 3) g_local = 1;      /* NET_MODE_JOIN */
     if ((e = getenv("SSBU_RB_NET_PLAYER"))) g_local = atoi(e) ? 1 : 0;
-    if ((e = getenv("SSBU_RB_NET_DELAY"))) g_delay_cfg = atoi(e);
+    if ((e = getenv("SSBU_RB_NET_DELAY")) && *e) g_delay_cfg = !_stricmp(e, "auto") ? -1 : atoi(e);      /* (-2 = the default: 0 with the ring) */
     if ((e = getenv("SSBU_RB_NET_BOT")) && *e) { g_bot = 1; g_bot_seed = (unsigned)strtoul(e, NULL, 0); }
     if ((e = getenv("SSBU_RB_NET_AHEAD")) && atoi(e) > 0) g_ahead = atoi(e);
     if ((e = getenv("SSBU_RB_NET_LOG")) && *e) g_hlog = fopen(e, "w");
-    printf("[rbnet] on: %s, local player %d, delay %s, ahead at most %d, bot %s\n", g_loop ? "loop test (no network)" : "over net_relay", g_local + 1, g_delay_cfg >= 0 ? "fixed" : "from the round trip", g_ahead, g_bot ? "on" : "off");
+    printf("[rbnet] on: %s, local player %d, delay %s, ahead at most %d, bot %s\n", g_loop ? "loop test (no network)" : "over net_relay", g_local + 1, g_delay_cfg >= 0 ? "fixed" : g_delay_cfg == -1 ? "from the round trip" : "0 unless the trip is longer than the rollback window", g_ahead, g_bot ? "on" : "off");
     if (g_loop) printf("[rbnet] loop: remote pads arrive %d frames after the frame that would send them\n", g_loop_lat);
     fflush(stdout);
     return g_on;
@@ -637,6 +638,16 @@ static int auto_delay(void) {
     }
     if (g_loop) return 2;
     int rtt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
+    /* (2026-11-02) both games have the ring: no input delay while rollback (at most g_ahead frames ahead, 5 by default)
+     * covers the one-way trip + 1.5 frames (pads are sent once a frame, and jitter); above that 1 frame of delay per frame
+     * short: 0 up to about 117 ms round trip, 1 up to about 150 ms, 2 up to about 183 ms. Two games, 150 ms, delay 0:
+     * 712 / 883 waits for the other player in 1,900 frames, the trip being too close to the 5 frames.
+     * SSBU_RB_NET_DELAY=auto: the old choice (the trip minus 2 frames, 1..4) */
+    if (g_delay_cfg == -2) {
+        if (rtt <= 0) return 0;
+        int d = (int)ceil(rtt / 2000.0 / (1000.0 / 60.0) + 1.5 - g_ahead);
+        return d < 0 ? 0 : d > 4 ? 4 : d;
+    }
     if (rtt <= 0) return 2;
     double one_way = rtt / 2000.0 / (1000.0 / 60.0);     /* frames */
     int d = (int)(one_way - 2.0 + 0.5);                   /* up to 2 frames of lateness covered by rollback */
@@ -649,7 +660,7 @@ void rbn_start(long long f0) {
     if (g_peerdelay < 0) { const char *e = getenv("SSBU_RB_NET_PEERDELAY"); g_peerdelay = !(e && e[0] == '0'); }
     g_my_lockd = lock_delay();                          /* (hs14) announced in every PADS message of this match (frozen here) */
     g_delay = auto_delay();
-    if (g_delay < 1) g_delay = 1;                        /* (frames 1..delay are empty on both sides: no rollback can reach the base state, made before the start barrier) */
+    if (g_delay < 1 && g_lockstep) g_delay = 1;          /* (no ring: every frame waits for the other pad; with the ring, frames 1..RB_LEADIN are empty on both sides whatever the delay: rb.h) */
     rb_input_reset(2, g_local, g_delay);
     rb_ts_reset(16683);
     if (!g_loop && rbn_handshake_wanted()) { hs_block_capture(); hs_block_send(); }     /* the match block check */
@@ -660,7 +671,7 @@ void rbn_start(long long f0) {
 /* after the start barrier: the delay again from the round trip measured meanwhile (no frame has run: the queues start over;
  * pads of the other game already queued are sent again by it, from our acknowledgement on) */
 void rbn_choose_delay(void) {
-    int d = auto_delay(); if (d < 1) d = 1;
+    int d = auto_delay(); if (d < 1 && (g_lockstep || peer_lockstep())) d = 1;      /* (delay 0 only when both games roll back) */
     if (g_lockstep && !g_peerdelay) printf("[rbnet] after the start barrier: this game has no snapshot ring (old way, SSBU_RB_NET_PEERDELAY=0): the other game keeps its own delay\n");
     else if (!g_loop && (g_lockstep || peer_lockstep())) printf("[rbnet] after the start barrier: %s snapshot ring: delay-based pacing, both games use input delay %d (announced here %d, there %d; mode byte here %02x, there %02x)\n",
         g_lockstep && peer_lockstep() ? "neither game has a" : g_lockstep ? "this game has no" : "the other game has no", d, g_my_lockd, g_peer_mode >= 0 ? (int)(g_peer_mode & 0x7f) : -1, my_mode(), (unsigned)(g_peer_mode & 0xff));

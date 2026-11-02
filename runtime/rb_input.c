@@ -31,7 +31,7 @@ RbPad rb_input_local(int frame, RbPad now) {
     static const RbPad zero;
     int f = frame + g_delay;
     for (int g = g_llatest + 1; g < f; g++) { g_lpad[g & M] = zero; g_lframe[g & M] = g; }     /* the first frames: nothing pressed */
-    if (f > g_llatest) { g_lpad[f & M] = rb_pad_rest(now); g_lframe[f & M] = f; g_llatest = f; }
+    if (f > g_llatest) { g_lpad[f & M] = f <= RB_LEADIN ? zero : rb_pad_rest(now); g_lframe[f & M] = f; g_llatest = f; }
     return g_lframe[frame & M] == frame ? g_lpad[frame & M] : zero;
 }
 int rb_input_local_latest(void) { return g_llatest; }

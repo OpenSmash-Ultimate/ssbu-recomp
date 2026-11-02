@@ -158,8 +158,13 @@ the room's. Each player plays with his own name-tag controls (button layout and 
 off use the game's own online netcode as before (a short message says so once), so players with different settings can
 still play together in a room.
 
-Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
-4 from about 184 ms (the rest of the trip is covered by rollback).
+There is no input delay by default while rollback covers the trip: at most 5 frames are rolled back, which with a margin
+for jitter covers a round trip up to about 117 ms. Above that the delay goes up 1 frame at a time (1 up to about 150 ms, 2 up
+to about 183 ms, at most 4), so the games do not keep waiting for each other. The first 4 frames of a match carry no buttons
+on both games. `SSBU_RB_NET_DELAY=<n>` sets a fixed delay, `SSBU_RB_NET_DELAY=auto` chooses it from the
+round trip as before (1 frame below about 117 ms, 2 from about 117 ms, 3 from 150 ms, 4 from about 184 ms), and
+`SSBU_RB_NET_AHEAD=<n>` changes the 5 frames (at most 7). When either game has no snapshot ring the match is delay-based and
+uses at least 1 frame.
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
 Windows and Linux (not macOS; a Windows game against a Linux one not tried); tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between real

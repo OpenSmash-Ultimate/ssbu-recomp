@@ -18,6 +18,11 @@ typedef struct { uint64_t buttons; int16_t lx, ly, rx, ry; } RbPad;      /* as n
 
 /* ---------------------------------------------------------------- input queues (rb_input.c) */
 void rb_input_reset(int nplayers, int local, int delay);   /* frames are counted from 1 */
+/* (2026-11-02, input delay 0 by default) frames 1..RB_LEADIN carry no buttons whatever the delay (each game sends empty pads
+ * for them; the guess for the other player is empty too): no wrong guess there, so no rollback reaches the match's base
+ * state, and a base made a few passes late on one game (r1 "base state is frame n") stays safe, as frames 1..delay did
+ * when the delay was at least 1. 4 frames = 67 ms of the countdown. */
+#define RB_LEADIN 4
 int rb_input_delay(void);
 RbPad rb_pad_rest(RbPad p);                        /* the stick clamp both sides apply before a pad is stored or sent */
 int rb_pad_equal(const RbPad *a, const RbPad *b);
