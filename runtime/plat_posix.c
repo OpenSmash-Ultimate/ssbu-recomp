@@ -1192,6 +1192,13 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
 /* The rollback's learned-set save (rb_learned.c) makes hundreds of thousands of pages read-only and opens them one by one
  * from its fault handler: the segment list would be split at every page (and its lock is no place for a fault handler).
  * Those pages stay committed read-write in the bookkeeping, which is their state for everything but the first write. */
+int plat_vm_tracked(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    vm_lock();
+    int i = seg_find(a), r = i < g_nseg && g_seg[i].lo <= a;
+    vm_unlock();
+    return r;
+}
 int plat_protect_raw(void *p, size_t n, DWORD prot) {
     uintptr_t lo = (uintptr_t)p & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)p + n + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
     return mprotect((void *)lo, hi - lo, prot_posix(prot)) == 0;

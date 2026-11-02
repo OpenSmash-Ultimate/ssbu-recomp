@@ -330,6 +330,7 @@ typedef struct EXCEPTION_POINTERS { EXCEPTION_RECORD *ExceptionRecord; CONTEXT *
 typedef LONG (*PVECTORED_EXCEPTION_HANDLER)(EXCEPTION_POINTERS *e);
 PVOID AddVectoredExceptionHandler(ULONG first, PVECTORED_EXCEPTION_HANDLER fn);
 int plat_protect_raw(void *p, size_t n, DWORD prot);    /* mprotect alone: VirtualQuery keeps the old protection (rb_learned.c) */
+int plat_vm_tracked(const void *p);                     /* p lies in memory made by VirtualAlloc (the page-state map), not in a host mapping VirtualQuery reads from the kernel (r1_state.c) */
 
 /* ---- virtual memory (mmap, with a page-state map for VirtualQuery) ---- */
 #define MEM_COMMIT 0x1000

@@ -146,17 +146,29 @@ static void add_alloc(void *inside) {
     while (VirtualQuery(p, &m, sizeof m) && m.AllocationBase == base) p = (uint8_t *)m.BaseAddress + m.RegionSize;
     add_span(base, p);
 }
+/* (2026-11-02, Linux, a Local Wireless room match with the NVIDIA GPU: "FULL SAVE NOT MADE: it needs 751499 MB, 38052 MB
+ * free", so no rollback) on Linux VirtualQuery reports a mapping that VirtualAlloc did not make (a driver's, the C library's)
+ * from the kernel, as committed read-write over its whole length, touched or not; one of >= 16 GB was taken for a game region
+ * and all of it counted as state. The game's regions (os_AllocateAddressRegion, the guest malloc reservation) are all made
+ * by VirtualAlloc, so on Linux / macOS only those count. */
+static void heap_found(uint8_t *base, size_t span) {
+    if (!base || span < (16ull << 30) || g_nheap >= 8) return;
+#ifndef _WIN32
+    if (!plat_vm_tracked(base)) { LOG("r1: a %.1f GB mapping at %p not made by the game (a driver's or a library's): not a game region\n", span / 1073741824.0, (void *)base); return; }
+#endif
+    g_heap_base[g_nheap++] = base;
+}
 static void find_heaps(void) {             /* once: the reservations of >= 16 GB (the game's address region) */
     MEMORY_BASIC_INFORMATION m;
     uint8_t *cur = NULL; size_t span = 0;
     for (uint8_t *p = (uint8_t *)0x10000; (uintptr_t)p < 0x7FFFFFFF0000ull && VirtualQuery(p, &m, sizeof m); p = (uint8_t *)m.BaseAddress + m.RegionSize) {
         if (m.AllocationBase != cur) {
-            if (cur && span >= (16ull << 30) && g_nheap < 8) g_heap_base[g_nheap++] = cur;
+            heap_found(cur, span);
             cur = (uint8_t *)m.AllocationBase; span = 0;
         }
         if (cur) span += m.RegionSize;
     }
-    if (cur && span >= (16ull << 30) && g_nheap < 8) g_heap_base[g_nheap++] = cur;
+    heap_found(cur, span);
     for (int i = 0; i < g_nheap; i++) LOG("r1: game address region %d at %p\n", i, (void *)g_heap_base[i]);
 }
 static uint64_t g_ex[512][2]; static int g_nex;                       /* other guest threads' stacks: never saved / restored */
