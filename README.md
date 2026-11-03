@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **This project has moved.** WindowSmash and ssbu-recomp are now one project, **[OpenSmash-Ultimate](https://github.com/OpenSmash-Ultimate/OpenSmash-Ultimate)**: new versions, issues and pull requests go there. Join the merged Discord: **[discord.gg/pkgyYGf3YB](https://discord.gg/pkgyYGf3YB)**. This repository is kept for its history.
+
 <div align="center">
 
 <img src="media/og-image.png" alt="OpenSmash-Ultimate" width="100%">
@@ -7,14 +10,14 @@
 **Super Smash Bros. Ultimate as a native PC program: recompiled, not emulated.**
 One-click installer, Vulkan renderer, in-game settings, fighters as readable C++ source, online and rollback in progress.
 
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/RyZpx3u2t4)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/pkgyYGf3YB)
 [![Website](https://img.shields.io/badge/website-denkishi.github.io-informational)](https://denkishi.github.io/opensmash-site/)
 [![Download](https://img.shields.io/badge/download-ZIP-brightgreen?logo=github)](https://github.com/Denkishi/ssbu-recomp/archive/refs/heads/main.zip)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-lightgrey)
 ![Game versions](https://img.shields.io/badge/game-13.0.4%20%7C%2013.0.5-green)
 
-### [Install](#install-in-3-steps) &nbsp;|&nbsp; [Website](https://denkishi.github.io/opensmash-site/) &nbsp;|&nbsp; [Discord](https://discord.gg/RyZpx3u2t4)
+### [Install](#install-in-3-steps) &nbsp;|&nbsp; [Website](https://denkishi.github.io/opensmash-site/) &nbsp;|&nbsp; [Discord](https://discord.gg/pkgyYGf3YB)
 
 </div>
 
@@ -243,7 +246,7 @@ and mistakes that a specialist would not have made.
 Testers with other GPUs and controllers, and people who know the game's internals or the modding scene's tooling, are
 very welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: three rules (nothing derived from the game in the
 repository, clean sources only, every claim measured) apply to every contribution. Questions and bug reports: the
-[Discord](https://discord.gg/RyZpx3u2t4) or GitHub issues (attach the log from the settings menu and your
+[Discord](https://discord.gg/pkgyYGf3YB) or GitHub issues (attach the log from the settings menu and your
 `config\graphics.ini`).
 
 ## Credits
