@@ -47,15 +47,37 @@ unsigned gca_seq(void) { return 0; }
 #define MAX_ADAPTERS 2
 #define DEPTH 4
 #define REPORT_LEN 37
-#define EP_IN 0x81
-#define EP_OUT 0x02
+#define DEFAULT_EP_IN 0x81
+#define DEFAULT_EP_OUT 0x02
 #define STICK_RANGE 88.0f                     /* counts from the origin to full deflection (SDL's own base range for this adapter; this pad's gate measured ~94) */
 #define TRIG_FULL 255                         /* raw trigger value taken as fully pressed */
 #define CALIB_REPORTS 5
 
 typedef PVOID WUSB;
+#pragma pack(push, 1)
+typedef struct _USB_INTERFACE_DESCRIPTOR {
+    UCHAR bLength;
+    UCHAR bDescriptorType;
+    UCHAR bInterfaceNumber;
+    UCHAR bAlternateSetting;
+    UCHAR bNumEndpoints;
+    UCHAR bInterfaceClass;
+    UCHAR bInterfaceSubClass;
+    UCHAR bInterfaceProtocol;
+    UCHAR iInterface;
+} USB_INTERFACE_DESCRIPTOR;
+typedef struct _WINUSB_PIPE_INFORMATION {
+    ULONG PipeType;
+    UCHAR PipeId;
+    USHORT MaximumPacketSize;
+    UCHAR Interval;
+} WINUSB_PIPE_INFORMATION;
+#pragma pack(pop)
+
 static BOOL (WINAPI *pInit)(HANDLE, WUSB *);
 static BOOL (WINAPI *pFree)(WUSB);
+static BOOL (WINAPI *pQueryInterfaceSettings)(WUSB, UCHAR, USB_INTERFACE_DESCRIPTOR *);
+static BOOL (WINAPI *pQueryPipeInformation)(WUSB, UCHAR, UCHAR, WINUSB_PIPE_INFORMATION *);
 static BOOL (WINAPI *pSetPipePolicy)(WUSB, UCHAR, ULONG, ULONG, PVOID);
 static BOOL (WINAPI *pRead)(WUSB, UCHAR, PUCHAR, ULONG, PULONG, LPOVERLAPPED);
 static BOOL (WINAPI *pWrite)(WUSB, UCHAR, PUCHAR, ULONG, PULONG, LPOVERLAPPED);
@@ -77,6 +99,8 @@ typedef struct {
     volatile LONG running;
     int index;
     WCHAR path[MAX_PATH];
+    UCHAR ep_in;
+    UCHAR ep_out;
     Port port[4];
     volatile LONG rumble[4];
 } Adapter;
@@ -193,7 +217,7 @@ static void send_rumble(Adapter *a, WUSB w, unsigned char *last, int *last_valid
     }
     if (!changed) return;
     ULONG n = 0;
-    if (pWrite(w, EP_OUT, cmd, sizeof cmd, &n, NULL)) {
+    if (pWrite(w, a->ep_out, cmd, sizeof cmd, &n, NULL)) {
         memcpy(last, cmd + 1, 4); *last_valid = 1;
     } else {
         static volatile LONG werr;
@@ -219,6 +243,22 @@ static DWORD WINAPI adapter_thread(LPVOID arg) {
         goto done_handle;
     }
     InterlockedExchange(&warned, 0);
+    a->ep_in = DEFAULT_EP_IN;
+    a->ep_out = DEFAULT_EP_OUT;
+    if (pQueryInterfaceSettings && pQueryPipeInformation) {
+        USB_INTERFACE_DESCRIPTOR iface;
+        memset(&iface, 0, sizeof iface);
+        if (pQueryInterfaceSettings(w, 0, &iface)) {
+            for (UCHAR p = 0; p < iface.bNumEndpoints; p++) {
+                WINUSB_PIPE_INFORMATION pipe;
+                memset(&pipe, 0, sizeof pipe);
+                if (pQueryPipeInformation(w, 0, p, &pipe)) {
+                    if ((pipe.PipeId & 0x80) && a->ep_in == DEFAULT_EP_IN) a->ep_in = pipe.PipeId;
+                    else if (!(pipe.PipeId & 0x80) && a->ep_out == DEFAULT_EP_OUT) a->ep_out = pipe.PipeId;
+                }
+            }
+        }
+    }
     {
         unsigned char raw = 1, start = 0x13, last[4] = {0}, rep_last[REPORT_LEN] = {0};
         int last_valid = 0, have_rep = 0, reports = 0, i, next = 0;
@@ -228,15 +268,15 @@ static DWORD WINAPI adapter_thread(LPVOID arg) {
         LONG64 t_prev = 0, t_win = now_ticks();
         double imin = 1e9, isum = 0, imax = 0, ap_sum = 0, ap_max = 0;
         int dead = 0;
-        pSetPipePolicy(w, EP_IN, RAW_IO, 1, &raw);
-        if (!pWrite(w, EP_OUT, &start, 1, &n, NULL)) { printf("nn::gca: the adapter does not accept the start command (error %lu)\n", GetLastError()); goto done_wusb; }
+        pSetPipePolicy(w, a->ep_in, RAW_IO, 1, &raw);
+        if (!pWrite(w, a->ep_out, &start, 1, &n, NULL)) { printf("nn::gca: the adapter does not accept the start command (error %lu)\n", GetLastError()); goto done_wusb; }
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         memset(ov, 0, sizeof ov);
         for (i = 0; i < DEPTH; i++) ov[i].hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
         for (i = 0; i < DEPTH; i++) {
-            if (!pRead(w, EP_IN, buf[i], REPORT_LEN, NULL, &ov[i]) && GetLastError() != ERROR_IO_PENDING) dead = 1;
+            if (!pRead(w, a->ep_in, buf[i], REPORT_LEN, NULL, &ov[i]) && GetLastError() != ERROR_IO_PENDING) dead = 1;
         }
-        printf("nn::gca: adapter %d opened (%d reads queued, RAW_IO)\n", a->index + 1, DEPTH);
+        printf("nn::gca: adapter %d opened (%d reads queued, RAW_IO, in 0x%02x, out 0x%02x)\n", a->index + 1, DEPTH, a->ep_in, a->ep_out);
         fflush(stdout);
         while (!dead) {
             DWORD r = WaitForSingleObject(ov[next].hEvent, 1500);
@@ -257,11 +297,11 @@ static DWORD WINAPI adapter_thread(LPVOID arg) {
                 }
             }
             ResetEvent(ov[next].hEvent);
-            if (!pRead(w, EP_IN, buf[next], REPORT_LEN, NULL, &ov[next]) && GetLastError() != ERROR_IO_PENDING) { dead = 1; break; }
+            if (!pRead(w, a->ep_in, buf[next], REPORT_LEN, NULL, &ov[next]) && GetLastError() != ERROR_IO_PENDING) { dead = 1; break; }
             next = (next + 1) % DEPTH;
             send_rumble(a, w, last, &last_valid, have_rep ? rep_last : NULL);
         }
-        pAbort(w, EP_IN);
+        pAbort(w, a->ep_in);
         for (i = 0; i < DEPTH; i++) { ULONG g; pOverlapped(w, &ov[i], &g, TRUE); CloseHandle(ov[i].hEvent); }
     }
 done_wusb:
@@ -356,6 +396,8 @@ int gca_start(void) {
     if (!wu) return 0;
     pInit = (void *)GetProcAddress(wu, "WinUsb_Initialize");
     pFree = (void *)GetProcAddress(wu, "WinUsb_Free");
+    pQueryInterfaceSettings = (void *)GetProcAddress(wu, "WinUsb_QueryInterfaceSettings");
+    pQueryPipeInformation = (void *)GetProcAddress(wu, "WinUsb_QueryPipeInformation");
     pSetPipePolicy = (void *)GetProcAddress(wu, "WinUsb_SetPipePolicy");
     pRead = (void *)GetProcAddress(wu, "WinUsb_ReadPipe");
     pWrite = (void *)GetProcAddress(wu, "WinUsb_WritePipe");
