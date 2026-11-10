@@ -293,36 +293,7 @@ double display_hfr_alpha(LONG64 t_prev, LONG64 t_cur) {
     return 1.0;
 }
 static void display_hfr_step_sync(void) {
-    if (g_game_build < 0) return;
-    int hz = display_hfr_hz();
-    if (hz <= 60) {
-        if (g_hfr_was_active) {
-            g_hfr_was_active = 0;
-            wr32(GA(0x710593a454ull), 0);
-            wr8(GA(0x710593a448ull), 1);
-        }
-        InterlockedIncrement64(&g_hfr_sim_frames);
-        g_hfr_last_sig = g_vsync_signals;
-        return;
-    }
-    g_hfr_was_active = 1;
-    int sim_rate = (int)rd32(GA(0x710523c004ull));
-    if (sim_rate <= 0 || sim_rate > 60) sim_rate = 60;
-    LONG64 sig = g_vsync_signals;
-    if (sig != g_hfr_last_sig) {
-        g_hfr_last_sig = sig;
-        g_hfr_sim_acc += sim_rate;
-        if (g_hfr_sim_acc >= 60) {
-            g_hfr_sim_acc -= 60;
-            wr32(GA(0x710593a454ull), 0);
-            wr8(GA(0x710593a448ull), 1);
-            InterlockedIncrement64(&g_hfr_sim_frames);
-            return;
-        }
-    }
-    wr32(GA(0x710593a454ull), (uint32_t)(sim_rate + 60));
-    wr8(GA(0x710593a448ull), 0);
-    wr32(GA(0x710593a440ull), 0);
+    InterlockedIncrement64(&g_hfr_sim_frames);
 }
 static void pace_options(void) {
     if (g_pace_want >= 0) return;
@@ -659,35 +630,13 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         pace_options();
         display_perf_thread();
         for (;;) {
-            int hz = display_hfr_hz();
-            if (hz != prev_hz) {
-                t0.QuadPart = 0;
-                n_base = n;
-                vs_acc = 0;
-                prev_hz = hz;
-            }
             if (g_pace_want && !lock_tried && g_vb_state == 2) {                  /* session 14: the refresh is measured: lock to it or not */
                 lock_tried = 1;
                 int k = pace_try_lock();
                 if (k) { vb_last = g_vb_count; InterlockedExchange(&g_lock_k, k); }
             }
             if (g_pace_want && !lock_tried && g_vb_state == -1) { lock_tried = 1; printf("display: no vblank source: our own 60 Hz clock%c", 10); }
-            if (hz > 60) {
-                if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart; n_base = n; }
-                LONGLONG target = t0.QuadPart + (LONGLONG)(((double)(n - n_base + 1) * (double)g_freq.QuadPart) / (double)hz + 0.5);
-                precise_wait_until(target, timer);
-                QueryPerformanceCounter(&now);
-                LONG64 passed = n_base + (LONG64)(((double)(now.QuadPart - t0.QuadPart) * (double)hz) / (double)g_freq.QuadPart);
-                if (passed < n + 1) passed = n + 1;
-                if (passed > n + 1) InterlockedExchangeAdd64(&g_vsync_late, passed - (n + 1));
-                LONG64 dn = passed - n;
-                n = passed;
-                vs_acc += (int)(dn * 60);
-                if (vs_acc >= hz) {
-                    vs_acc %= hz;
-                    if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
-                }
-            } else if (g_lock_k) {
+            if (g_lock_k) {
                 LONG64 k = g_lock_k, vb_target = vb_last + k, vc, vq;
                 int timeouts = 0;
                 double period;
@@ -739,6 +688,40 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         vsync_test_key();
     }
 }
+void nvn_front_post_hfr_vblank(void);
+static DWORD WINAPI hfr_vblank_thread(LPVOID arg) {
+    (void)arg;
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    display_perf_thread();
+    LARGE_INTEGER t0, now;
+    t0.QuadPart = 0;
+    LONG64 n = 0, n_base = 0;
+    int prev_hz = 0;
+    for (;;) {
+        int hz = display_hfr_hz();
+        if (hz <= 60) {
+            Sleep(10);
+            t0.QuadPart = 0;
+            prev_hz = hz;
+            continue;
+        }
+        if (hz != prev_hz || !t0.QuadPart) {
+            QueryPerformanceCounter(&now);
+            t0.QuadPart = now.QuadPart;
+            n_base = n;
+            prev_hz = hz;
+        }
+        LONGLONG target = t0.QuadPart + (LONGLONG)(((double)(n - n_base + 1) * (double)g_freq.QuadPart) / (double)hz + 0.5);
+        precise_wait_until(target, timer);
+        QueryPerformanceCounter(&now);
+        LONG64 passed = n_base + (LONG64)(((double)(now.QuadPart - t0.QuadPart) * (double)hz) / (double)g_freq.QuadPart);
+        if (passed < n + 1) passed = n + 1;
+        n = passed;
+        nvn_front_post_hfr_vblank();
+    }
+    return 0;
+}
 static void vsync_test_key(void) {
 #ifndef _WIN32
     {   static int said; if (!said && getenv("SSBU_AUTOKEY")) { said = 1; printf("display: SSBU_AUTOKEY is not available in the Linux build (use SSBU_SEQ)\n"); } }
@@ -776,6 +759,7 @@ void display_init(void) {
     speed_init();
     if (!g_lockstep && !old_pacing()) CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);      /* session 14: the display's vblanks, timed */
     if (!g_lockstep) CreateThread(NULL, 0, vsync_thread, NULL, 0, NULL);
+    if (!g_lockstep) CreateThread(NULL, 0, hfr_vblank_thread, NULL, 0, NULL);
     { void nvn_vk_selftest_hook(void); nvn_vk_selftest_hook(); }      /* nvn_vk.c: SSBU_RENDERER=vk SSBU_VK_SELFTEST=<frames>, then exit (plan\phases\V1_vulkan.md, M1) */
 }
 
