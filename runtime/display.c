@@ -287,7 +287,11 @@ int display_hfr_toggle(void) {
 int display_hfr_try_queue(void) { return InterlockedCompareExchange(&g_hfr_queued, 1, 0) == 0; }
 void display_hfr_job_begin(void) { InterlockedExchange(&g_hfr_queued, 0); }
 void display_hfr_present_done(void) { InterlockedIncrement64(&g_hfr_presents); InterlockedIncrement64(&g_hfr_sec_presents); }
-double display_vblank_period_qpc(void) { return g_vb_state == 2 && g_vb_period > 0 ? g_vb_period : (double)g_freq.QuadPart / (double)display_hfr_hz(); }
+double display_vblank_period_qpc(void) {
+    int hz = display_hfr_hz();
+    if (hz > 60) return (double)g_freq.QuadPart / (double)hz;
+    return g_vb_state == 2 && g_vb_period > 0 ? g_vb_period : (double)g_freq.QuadPart / 60.0;
+}
 double display_hfr_alpha(LONG64 t_prev, LONG64 t_cur) {
     (void)t_prev; (void)t_cur;
     return 1.0;

@@ -3646,8 +3646,16 @@ double display_hfr_alpha(LONG64 t_prev, LONG64 t_cur);
 void nvn_vk_hfr_present_job(void *arg) {
     (void)arg;
     display_hfr_job_begin();
-    if (!V.alive || R.recording || g_pend.on || g_pend.recreate || !g_hfr.ready || g_ovl.screen || display_hfr_mode() <= 0 || !V.swapchain) return;
-    if (tk() - g_hfr.t_last_present < (LONG64)(display_vblank_period_qpc() * 0.45)) return;
+    if (!V.alive || g_pend.on || !g_hfr.ready || g_ovl.screen || display_hfr_mode() <= 0) return;
+    if (g_pend.recreate || !V.swapchain) {
+        g_pend.recreate = 0;
+        cmd_wait_all();
+        if (V.swapchain) swapchain_destroy();
+        InterlockedIncrement64(&g_vk_recreated);
+        if (!swapchain_create()) return;
+    }
+    double per_qpc = display_vblank_period_qpc();
+    if (tk() - g_hfr.t_last_present < (LONG64)(per_qpc * 0.25)) return;
     int next_sem = (g_isem + 1) % 8;
     if (!g_sem[next_sem][0]) {
         VkSemaphoreCreateInfo smi = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -3656,7 +3664,7 @@ void nvn_vk_hfr_present_job(void *arg) {
     }
     VkSemaphore acq = g_sem[next_sem][0], rend = g_sem[next_sem][1];
     uint32_t index = 0;
-    VkResult r = vkAcquireNextImageKHR(V.device, V.swapchain, 2000000ull, acq, NULL, &index);
+    VkResult r = vkAcquireNextImageKHR(V.device, V.swapchain, 1000000000ull, acq, NULL, &index);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { g_pend.recreate = 1; return; }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return;
     g_isem = next_sem;
@@ -3900,6 +3908,47 @@ swap: ;
     present_flush();
     tp[2] = tk();                               /* session 14: a present still kept for its tick goes out before the next one is made */
     if (g_pend.recreate) { g_pend.recreate = 0; cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); }
+    if (!V.swapchain) swapchain_create();
+    if (!progress && display_hfr_mode() > 0 && !g_ovl.screen && V.swapchain) {
+        if (vt && vt->samples == 1) {
+            int s4[4] = {0, 0, vt->w, vt->h};
+            if (j->win->crop[2] > 0 && j->win->crop[3] > 0) memcpy(s4, j->win->crop, sizeof s4);
+            if (vt->rs && j->win->crop[2] > 0 && j->win->crop[3] > 0) {
+                int x1 = rs_edge(s4[0] + s4[2], vt->sx, vt->w), y1 = rs_edge(s4[1] + s4[3], vt->sy, vt->h);
+                s4[0] = rs_edge(s4[0], vt->sx, vt->w); s4[1] = rs_edge(s4[1], vt->sy, vt->h); s4[2] = x1 - s4[0]; s4[3] = y1 - s4[1];
+            }
+            void display_fit(int sw, int sh, int dw, int dh, int out[4]);
+            int d4[4];
+            display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+            VTex *src = vt;
+            if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, d4[2], d4[3]);
+            cmd_begin();
+            vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cmd_begin();
+            hfr_capture(src, s4, d4);
+            cmd_submit(NULL, NULL);
+        } else {
+            cmd_submit(NULL, NULL);
+        }
+        g_wd_where = 0;
+        tp[5] = tk();
+        g_tm[4] += tp[5] - t_present;
+        nvn_front_frame_end(R.frame_draws, R.frame_skipped, R.frame_clears);
+        tp[6] = tk();
+        { static LONG64 disp_prev; g_in_fight = R.dispatches != disp_prev; disp_prev = R.dispatches; if (g_in_fight) { g_fight_last = frame; if (g_prep_state == 1) g_prep_fight_frames++; } }
+        {   static LONG64 t_prev;
+            LONG64 t_now = tk();
+            int battle = g_in_fight && R.frame_draws > 120;
+            if (battle) g_battle_frames++;
+            if (frame >= 0 && frame < FRSTAT_N) {
+                LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+                g_fr_fight[frame] = (uint8_t)battle;
+                g_fr_wall[frame] = t_prev ? (float)((double)(t_now - t_prev) * 1000.0 / (double)fq.QuadPart) : 0.0f;
+            }
+            t_prev = t_now;
+        }
+        return;
+    }
     /* an extra present of a held loading screen: everything submitted so far is waited for first, so that the semaphore pair
      * taken below has no pending operation (validation run s11v2: VUID-vkAcquireNextImageKHR-semaphore-01779, three times,
      * all at such presents: with one submission a present the pair came round before its command buffer had been waited for) */
@@ -3971,16 +4020,7 @@ swap: ;
             b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
             if (g_pt_on > 0) pt_mark((int)V.extent.width, (int)V.extent.height, 0, 0, 0, 1, 2);
             CKPT_OP("present blit (swapchain image, index, w)", V.images[index], index, vt->w, 0);
-            if (!progress && display_hfr_mode() > 0) {
-                hfr_capture(src, s4, d4);
-                float alpha = (float)display_hfr_alpha(g_hfr.t_prev, g_hfr.t_cur);
-                if (alpha < g_hfr.last_alpha) alpha = g_hfr.last_alpha;
-                g_hfr.last_alpha = alpha;
-                hfr_blit_or_blend(index, d4, alpha);
-                g_hfr.t_last_present = tk();
-            } else {
-                vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
-            }
+            vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
         fl_capture(vt, fl_s4, frame, fl_layout);      /* session 13: 16x9 copy of what is presented, for the flash detector */
         overlay_draw(index);
