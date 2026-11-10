@@ -574,11 +574,11 @@ static void sec_display(int cw, int ch) {
         int hfr = display_hfr_mode();
         int target_hz = display_hfr_hz();
         static const char *const k_hfr[] = {
-            "off (60 Hz)",
-            "144 Hz Fixed (6.94 ms, 60 Hz logic)",
-            "120 Hz Fixed (8.33 ms, 60 Hz logic)",
-            "165 Hz Fixed (6.06 ms, 60 Hz logic)",
-            "240 Hz Fixed (4.17 ms, 60 Hz logic)"
+            "Off (60 Hz standard)",
+            "120 Hz Fixed (8.33 ms)",
+            "144 Hz Fixed (6.94 ms)",
+            "165 Hz Fixed (6.06 ms)",
+            "240 Hz Fixed (4.17 ms)"
         };
         if (combo("Fixed Render Cadence", &hfr, k_hfr, N(k_hfr))) display_set_hfr_mode(hfr);
         tag(0, 0);

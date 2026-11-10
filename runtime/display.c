@@ -225,8 +225,8 @@ static DWORD WINAPI vblank_thread(LPVOID arg) {
     }
 }
 #endif
-static const int k_hfr_hz[5] = {60, 144, 120, 165, 240};
-static volatile LONG g_hfr_mode = -1;       /* 0 = off (60 Hz), 1 = 144 Hz, 2 = 120 Hz, 3 = 165 Hz, 4 = 240 Hz */
+static const int k_hfr_hz[5] = {60, 120, 144, 165, 240};
+static volatile LONG g_hfr_mode = -1;       /* 0 = off (60 Hz), 1 = 120 Hz, 2 = 144 Hz, 3 = 165 Hz, 4 = 240 Hz */
 static int g_hfr_custom_hz;
 static volatile LONG g_hfr_queued;
 static volatile LONG64 g_hfr_presents, g_hfr_sec_presents, g_hfr_sim_frames, g_hfr_last_sig;
@@ -234,16 +234,16 @@ static int g_hfr_sim_acc, g_hfr_was_active;
 int display_hfr_mode(void) {
     if (g_hfr_mode < 0) {
         const char *e = getenv("SSBU_HFR");
-        int m = 1;
+        int m = 2;  /* default to 144 Hz */
         if (e && e[0]) {
             if (!strcmp(e, "0") || !_stricmp(e, "off") || !strcmp(e, "60")) m = 0;
-            else if (!strcmp(e, "1") || !strcmp(e, "144") || !_stricmp(e, "on")) m = 1;
-            else if (!strcmp(e, "2") || !strcmp(e, "120")) m = 2;
+            else if (!strcmp(e, "1") || !strcmp(e, "120")) m = 1;
+            else if (!strcmp(e, "2") || !strcmp(e, "144") || !_stricmp(e, "on")) m = 2;
             else if (!strcmp(e, "3") || !strcmp(e, "165")) m = 3;
             else if (!strcmp(e, "4") || !strcmp(e, "240")) m = 4;
             else {
                 int v = atoi(e);
-                if (v > 60 && v <= 480) { g_hfr_custom_hz = v; m = 1; }
+                if (v > 60 && v <= 480) { g_hfr_custom_hz = v; m = 2; }
             }
         }
         if (InterlockedCompareExchange(&g_hfr_mode, m, -1) == -1) {
