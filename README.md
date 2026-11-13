@@ -117,14 +117,6 @@ fights), and a pixel comparison with the OpenGL renderer. The preparation takes 
 run and costs disk (about 2.5 GB of shader files, up to 0.9 GB of pipeline cache). A freeze that was reported once
 was not reproduced in long runs; its cause is **not established**.
 
-## Screenshots
-
-<!-- OWNER: add your own captures here (media/*.png or .gif), taken from your own game. Only our own captures: nothing
-     from Nintendo. Ideas: a fight with the F2 overlay, the F1 settings menu, the installer window, the menus.
-     Example: ![The settings menu](media/settings.png) -->
-
-![The menus running natively](media/menus.webp)
-
 ## How it works
 
 ```
