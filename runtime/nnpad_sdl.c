@@ -394,17 +394,31 @@ static int gca_port_from_name(const char *name) {      /* "GameCube Controller (
     int port = atoi(p + 5) - 1, ad = a ? atoi(a + 8) - 1 : 0;
     return port >= 0 && port < 4 && ad >= 0 && ad < 2 ? ad * 4 + port : -1;
 }
+static int kb_is_auto(void) { const char *k = getenv("SSBU_KEYBOARD_PLAYER"); return (!k || !k[0]) && g_cfg.kb_player == -2; }
+static void kb_auto_yield(void) {                 /* lock held: when keyboard = auto and a controller took g_kb_slot, move keyboard to the next free slot */
+    if (!kb_is_auto() || g_kb_slot < 0 || !slot_taken(g_kb_slot)) return;
+    int old = g_kb_slot;
+    g_kb_slot = -1;
+    for (int p = 0; p < 8 && g_kb_slot < 0; p++) if (!slot_taken(p) && slot_usable(p, "") && !g_cfg.pguid[p][0]) g_kb_slot = p;
+    if (g_kb_slot != old) {
+        if (g_kb_slot >= 0) say("nn::pad: keyboard moved to player %d\n", g_kb_slot + 1);
+        else say("nn::pad: keyboard = nobody\n");
+        void nnhid_kb_player_refresh(void);
+        nnhid_kb_player_refresh();
+    }
+}
 static int assign_slot(const Dev *d) {
+    int kb_block = kb_is_auto() ? -1 : g_kb_slot;
     for (int p = 0; p < 8; p++) if (g_cfg.pguid[p][0] && !_stricmp(g_cfg.pguid[p], d->guid) && !slot_taken(p)) return p;
     for (int i = 0; i < g_mem_n; i++) {
         int p = g_mem[i].slot;
-        if (!_stricmp(g_mem[i].guid, d->guid) && !slot_taken(p) && slot_usable(p, d->guid) && p != g_kb_slot) return p;
+        if (!_stricmp(g_mem[i].guid, d->guid) && !slot_taken(p) && slot_usable(p, d->guid) && p != kb_block) return p;
     }
     if (d->gca) {      /* adapter port N is player N when that slot is free */
         int p = gca_port_from_name(d->name);
-        if (p >= 0 && !slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
+        if (p >= 0 && !slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != kb_block) return p;
     }
-    for (int p = 0; p < 8; p++) if (!slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
+    for (int p = 0; p < 8; p++) if (!slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != kb_block) return p;
     return -1;
 }
 static void remember(const char *guid, int slot) {
@@ -449,7 +463,7 @@ static void dev_add(SDL_JoystickID id) {
     }
     d->wireless = SDL_GetJoystickConnectionState(d->js) == SDL_JOYSTICK_CONNECTION_WIRELESS;
     d->slot = assign_slot(d);
-    if (d->slot >= 0) { remember(d->guid, d->slot); apply_player_index(d); }
+    if (d->slot >= 0) { remember(d->guid, d->slot); apply_player_index(d); kb_auto_yield(); }
     say("nn::pad: connected \"%s\" (%s, %s%s) GUID %s -> %s", d->name, d->gp ? "gamepad" : "joystick WITHOUT mapping (guessed layout)", d->gp ? type_name(d->gtype) : "raw",
         d->has_gyro ? ", gyro" : "", d->guid, d->slot >= 0 ? "player " : "no free slot\n");
     if (d->slot >= 0) say("%d\n", d->slot + 1);
@@ -488,7 +502,7 @@ static void poll_devices(void) {                  /* lock held */
     SDL_free(ids);
     for (int i = 0; i < MAXDEV; i++) if (g_dev[i].used && !g_dev[i].ignored && g_dev[i].slot < 0) {      /* a slot may have been freed */
         g_dev[i].slot = assign_slot(&g_dev[i]);
-        if (g_dev[i].slot >= 0) { remember(g_dev[i].guid, g_dev[i].slot); apply_player_index(&g_dev[i]); say("nn::pad: \"%s\" -> player %d\n", g_dev[i].name, g_dev[i].slot + 1); }
+        if (g_dev[i].slot >= 0) { remember(g_dev[i].guid, g_dev[i].slot); apply_player_index(&g_dev[i]); kb_auto_yield(); say("nn::pad: \"%s\" -> player %d\n", g_dev[i].name, g_dev[i].slot + 1); }
     }
 }
 static void check_config(int force) {             /* lock held */

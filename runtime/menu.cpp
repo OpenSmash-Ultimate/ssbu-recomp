@@ -67,6 +67,10 @@ const char *nvn_vk_device_name(void);                                /* nvn_vk_m
 int osk_active(void);                                                /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
 extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
+extern "C" int display_hfr_mode(void);
+extern "C" int display_hfr_hz(void);
+extern "C" void display_set_hfr_mode(int mode);
+extern "C" int display_hfr_toggle(void);
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -567,15 +571,28 @@ static void sec_display(int cw, int ch) {
     {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
          * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
         double hz; int k; display_refresh_info(&hz, &k);
-        if (hz > 30 && k == 0) {
+        int hfr = display_hfr_mode();
+        int target_hz = display_hfr_hz();
+        static const char *const k_hfr[] = {
+            "Off (60 Hz standard)",
+            "120 Hz Fixed (8.33 ms)",
+            "144 Hz Fixed (6.94 ms)",
+            "165 Hz Fixed (6.06 ms)",
+            "240 Hz Fixed (4.17 ms)"
+        };
+        if (combo("Fixed Render Cadence", &hfr, k_hfr, N(k_hfr))) display_set_hfr_mode(hfr);
+        tag(0, 0);
+        ImGui::SameLine(); ImGui::TextDisabled("(F10 cycles in game)");
+        if (hfr > 0) {
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Fixed %d Hz cadence active (%.2f ms render period, exact 60.000 Hz game logic, VSync off).", target_hz, 1000.0 / (double)target_hz);
+        } else if (hz > 30 && k == 0) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
 #ifdef _WIN32
-            help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in Windows Settings > Display > "
-                 "Advanced display > Refresh rate, and the game locks to it: every frame is shown equally long. "
-                 "Or turn on G-Sync / FreeSync and play in fullscreen.");
+            help("Turn on High refresh rate (F10) above, or set the screen to 120 Hz (or 60 Hz) in Windows Settings > Display > "
+                 "Advanced display > Refresh rate. Or turn on G-Sync / FreeSync and play in fullscreen.");
 #else
-            help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in the system's display settings, "
-                 "and the game locks to it: every frame is shown equally long. Or turn on G-Sync / FreeSync (VRR) and play in fullscreen.");
+            help("Turn on High refresh rate (F10) above, or set the screen to 120 Hz (or 60 Hz) in the system's display settings. "
+                 "Or turn on G-Sync / FreeSync (VRR) and play in fullscreen.");
 #endif
         } else if (hz > 30) ImGui::TextDisabled("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
     }
@@ -1364,6 +1381,9 @@ static void draw_stats(void) {
     ImGui::Begin("##stats", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
     ImGui::Text("%.0f fps  %.2f ms", avg > 0 ? 1000.0f / avg : 0.0f, avg);
+    { int hfr = display_hfr_mode();
+      if (hfr > 0) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Fixed %d Hz (60Hz logic, F10)", display_hfr_hz());
+      else ImGui::TextDisabled("Fixed 60 Hz (F10)"); }
     static const char *const st[] = {"Offline", "Connecting...", "Online - connected", "Disconnected"};
     ImVec4 col = ns.state == NET_CONNECTED ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ns.state == NET_CONNECTING ? ImVec4(1, 0.8f, 0.2f, 1) : ns.state == NET_DISCONNECTED ? ImVec4(1, 0.4f, 0.4f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1);
     if (ns.state == NET_CONNECTED) ImGui::TextColored(col, "%s (%d players)", st[2], ns.players);

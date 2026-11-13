@@ -4801,6 +4801,9 @@ unsigned long nvn_front_present_tid(void) { return g_pf_main_tid; }      /* the 
  * render thread (in order with the other jobs; nobody waits for it). */
 void nvn_vk_present_flush_job(void *arg);              /* nvn_vk_draw.c */
 void nvn_front_post_present_flush(void) { if (g_vk) gl_post(nvn_vk_present_flush_job, NULL, 0); }
+void nvn_vk_hfr_present_job(void *arg);                /* nvn_vk_draw.c */
+int display_hfr_try_queue(void);                       /* display.c */
+void nvn_front_post_hfr_vblank(void) { if (g_vk && display_hfr_try_queue()) gl_post(nvn_vk_hfr_present_job, NULL, 0); }
 /* osk.c, the on-screen keyboard: drawn by the Vulkan renderer only (the OpenGL path keeps the old text dialog) */
 void nvn_vk_osk_redraw_job(void *arg);                 /* nvn_vk_draw.c */
 long long nvn_vk_presents(void);                       /* nvn_vk_draw.c */

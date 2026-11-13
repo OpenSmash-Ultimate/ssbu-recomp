@@ -225,6 +225,80 @@ static DWORD WINAPI vblank_thread(LPVOID arg) {
     }
 }
 #endif
+static const int k_hfr_hz[5] = {60, 120, 144, 165, 240};
+static volatile LONG g_hfr_mode = -1;       /* 0 = off (60 Hz), 1 = 120 Hz, 2 = 144 Hz, 3 = 165 Hz, 4 = 240 Hz */
+static int g_hfr_custom_hz;
+static volatile LONG g_hfr_queued;
+static volatile LONG64 g_hfr_presents, g_hfr_sec_presents, g_hfr_sim_frames, g_hfr_last_sig;
+static int g_hfr_sim_acc, g_hfr_was_active;
+int display_hfr_mode(void) {
+    if (g_hfr_mode < 0) {
+        const char *e = getenv("SSBU_HFR");
+        int m = 2;  /* default to 144 Hz */
+        if (e && e[0]) {
+            if (!strcmp(e, "0") || !_stricmp(e, "off") || !strcmp(e, "60")) m = 0;
+            else if (!strcmp(e, "1") || !strcmp(e, "120")) m = 1;
+            else if (!strcmp(e, "2") || !strcmp(e, "144") || !_stricmp(e, "on")) m = 2;
+            else if (!strcmp(e, "3") || !strcmp(e, "165")) m = 3;
+            else if (!strcmp(e, "4") || !strcmp(e, "240")) m = 4;
+            else {
+                int v = atoi(e);
+                if (v > 60 && v <= 480) { g_hfr_custom_hz = v; m = 2; }
+            }
+        }
+        if (InterlockedCompareExchange(&g_hfr_mode, m, -1) == -1) {
+            int hz = g_hfr_custom_hz > 60 ? g_hfr_custom_hz : k_hfr_hz[m];
+            printf("display: Fixed-Cadence High Refresh Rate initial mode: %d Hz (%.2f ms render, 60 Hz logic; press F10 in game to cycle)%c",
+                   hz, 1000.0 / (double)hz, 10);
+            fflush(stdout);
+        }
+    }
+    return (int)g_hfr_mode;
+}
+static int g_lockstep;
+int display_hfr_hz(void) {
+    int r1_on(void);
+    if (g_lockstep || r1_on()) return 60;
+    int m = display_hfr_mode();
+    if (m <= 0 || m >= 5) return 60;
+    return g_hfr_custom_hz > 60 ? g_hfr_custom_hz : k_hfr_hz[m];
+}
+void display_set_hfr_mode(int mode) {
+    if (mode < 0) mode = 0;
+    if (mode > 4) mode = 4;
+    g_hfr_custom_hz = 0;
+    InterlockedExchange(&g_hfr_mode, mode);
+    int hz = k_hfr_hz[mode];
+    printf("display: Fixed-Cadence High Refresh Rate set to %d Hz (%.2f ms render, 60.000 Hz logic)%c",
+           hz, 1000.0 / (double)hz, 10);
+    fflush(stdout);
+}
+int display_hfr_toggle(void) {
+    int next = (display_hfr_mode() + 1) % 5;
+    display_set_hfr_mode(next);
+    int hz = k_hfr_hz[next];
+    char msg[128];
+    if (next == 0) snprintf(msg, sizeof msg, "Cadence: Off (60.0 Hz / 16.67 ms standard)");
+    else snprintf(msg, sizeof msg, "Cadence: %d.0 Hz Fixed (%.2f ms true render, 60 Hz logic)", hz, 1000.0 / (double)hz);
+    void menu_popup(const char *title, const char *text);
+    menu_popup("Fixed Refresh Rate (F10)", msg);
+    return next;
+}
+int display_hfr_try_queue(void) { return InterlockedCompareExchange(&g_hfr_queued, 1, 0) == 0; }
+void display_hfr_job_begin(void) { InterlockedExchange(&g_hfr_queued, 0); }
+void display_hfr_present_done(void) { InterlockedIncrement64(&g_hfr_presents); InterlockedIncrement64(&g_hfr_sec_presents); }
+double display_vblank_period_qpc(void) {
+    int hz = display_hfr_hz();
+    if (hz > 60) return (double)g_freq.QuadPart / (double)hz;
+    return g_vb_state == 2 && g_vb_period > 0 ? g_vb_period : (double)g_freq.QuadPart / 60.0;
+}
+double display_hfr_alpha(LONG64 t_prev, LONG64 t_cur) {
+    (void)t_prev; (void)t_cur;
+    return 1.0;
+}
+static void display_hfr_step_sync(void) {
+    InterlockedIncrement64(&g_hfr_sim_frames);
+}
 static void pace_options(void) {
     if (g_pace_want >= 0) return;
     const char *e = getenv("SSBU_PACE"), *h = getenv("SSBU_PACE_HOLD"), *p = getenv("SSBU_PACE_PHASE");
@@ -379,6 +453,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 1;
     }
     if (m == WM_SIZING && !g_full) { sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
+    if (m == WM_KEYDOWN && w == VK_F10 && !(l & (1 << 30))) { display_hfr_toggle(); return 0; }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
     if (m == WM_APP + 0x51) { window_mode_set(h, (int)w); return 0; }                                 /* U1: the settings menu (menu.cpp) */
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
@@ -554,8 +629,8 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         LONG64 n = 0;
         HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        int lock_tried = 0;
-        LONG64 vb_last = 0;
+        int lock_tried = 0, prev_hz = 60, vs_acc = 0;
+        LONG64 vb_last = 0, n_base = 0;
         pace_options();
         display_perf_thread();
         for (;;) {
@@ -586,17 +661,18 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
                 if (extra) InterlockedExchangeAdd64(&g_vsync_late, extra);
                 n += 1 + extra;
                 t0.QuadPart = 0;
+                if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
             } else {
-            if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart - n * g_freq.QuadPart / 60; }
-            LONGLONG target = t0.QuadPart + (n + 1) * g_freq.QuadPart / 60;       /* no accumulated rounding */
-            precise_wait_until(target, timer);
-            QueryPerformanceCounter(&now);
-            LONG64 passed = (now.QuadPart - t0.QuadPart) * 60 / g_freq.QuadPart;   /* >= n + 1; more when this thread was kept off the CPU */
-            if (passed < n + 1) passed = n + 1;
-            if (passed > n + 1) InterlockedExchangeAdd64(&g_vsync_late, passed - (n + 1));
-            n = passed;
+                if (!t0.QuadPart) { QueryPerformanceCounter(&now); t0.QuadPart = now.QuadPart; n_base = n; }
+                LONGLONG target = t0.QuadPart + (n - n_base + 1) * g_freq.QuadPart / 60;       /* no accumulated rounding */
+                precise_wait_until(target, timer);
+                QueryPerformanceCounter(&now);
+                LONG64 passed = n_base + (now.QuadPart - t0.QuadPart) * 60 / g_freq.QuadPart;   /* >= n + 1; more when this thread was kept off the CPU */
+                if (passed < n + 1) passed = n + 1;
+                if (passed > n + 1) InterlockedExchangeAdd64(&g_vsync_late, passed - (n + 1));
+                n = passed;
+                if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
             }
-            if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
             AcquireSRWLockExclusive(&g_vsync_lock);
             { LARGE_INTEGER tq; QueryPerformanceCounter(&tq); g_tick_at[n & 15] = tq.QuadPart; }      /* L1: when this tick was given */
             InterlockedExchange64(&g_vsync_n, n);
@@ -615,6 +691,40 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
         if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
         vsync_test_key();
     }
+}
+void nvn_front_post_hfr_vblank(void);
+static DWORD WINAPI hfr_vblank_thread(LPVOID arg) {
+    (void)arg;
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    display_perf_thread();
+    LARGE_INTEGER t0, now;
+    t0.QuadPart = 0;
+    LONG64 n = 0, n_base = 0;
+    int prev_hz = 0;
+    for (;;) {
+        int hz = display_hfr_hz();
+        if (hz <= 60) {
+            Sleep(10);
+            t0.QuadPart = 0;
+            prev_hz = hz;
+            continue;
+        }
+        if (hz != prev_hz || !t0.QuadPart) {
+            QueryPerformanceCounter(&now);
+            t0.QuadPart = now.QuadPart;
+            n_base = n;
+            prev_hz = hz;
+        }
+        LONGLONG target = t0.QuadPart + (LONGLONG)(((double)(n - n_base + 1) * (double)g_freq.QuadPart) / (double)hz + 0.5);
+        precise_wait_until(target, timer);
+        QueryPerformanceCounter(&now);
+        LONG64 passed = n_base + (LONG64)(((double)(now.QuadPart - t0.QuadPart) * (double)hz) / (double)g_freq.QuadPart);
+        if (passed < n + 1) passed = n + 1;
+        n = passed;
+        nvn_front_post_hfr_vblank();
+    }
+    return 0;
 }
 static void vsync_test_key(void) {
 #ifndef _WIN32
@@ -653,6 +763,7 @@ void display_init(void) {
     speed_init();
     if (!g_lockstep && !old_pacing()) CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);      /* session 14: the display's vblanks, timed */
     if (!g_lockstep) CreateThread(NULL, 0, vsync_thread, NULL, 0, NULL);
+    if (!g_lockstep) CreateThread(NULL, 0, hfr_vblank_thread, NULL, 0, NULL);
     { void nvn_vk_selftest_hook(void); nvn_vk_selftest_hook(); }      /* nvn_vk.c: SSBU_RENDERER=vk SSBU_VK_SELFTEST=<frames>, then exit (plan\phases\V1_vulkan.md, M1) */
 }
 
@@ -718,12 +829,20 @@ static void frame_queued(void) {
     }
     if ((now.QuadPart - second_start.QuadPart) >= g_freq.QuadPart) {
         char title[160];
+        LONG64 hfr_sec = InterlockedExchange64(&g_hfr_sec_presents, 0);
+        LONG64 disp_fps = second_frames + hfr_sec;
+        LONG64 sim_fps = InterlockedExchange64(&g_hfr_sim_frames, 0);
+        if (!sim_fps) sim_fps = second_frames;
+        int hfr_hz = display_hfr_hz();
         if (g_lockstep) printf("speed: frame %lld, %lld frames presented in the last %.2f s (%.1f per second)%c", (long long)n, (long long)second_frames,
                                (double)(now.QuadPart - second_start.QuadPart) / (double)g_freq.QuadPart, (double)second_frames * (double)g_freq.QuadPart / (double)(now.QuadPart - second_start.QuadPart), 10);
-        if (gfx_options()->overlay && second_frames) {       /* track O: frame_time_overlay = on */
-            double ms = (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)second_frames;
-            printf("frame-time: %.2f ms per frame over the last second (%lld frames)\n", ms, (long long)second_frames);
-            snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, ms);
+        if (gfx_options()->overlay && disp_fps) {       /* track O: frame_time_overlay = on */
+            double ms = (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)disp_fps;
+            printf("frame-time: %.2f ms per frame over the last second (%lld display fps, %lld sim fps)\n", ms, (long long)disp_fps, (long long)sim_fps);
+            if (hfr_hz > 60) snprintf(title, sizeof title, "%s - frame %lld - %lld fps (%lld Hz sim, %d Hz Fixed) - %.2f ms", g_title, (long long)n, (long long)disp_fps, (long long)sim_fps, hfr_hz, ms);
+            else snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, ms);
+        } else if (hfr_hz > 60) {
+            snprintf(title, sizeof title, "%s - frame %lld - %lld fps (%lld Hz sim, %d Hz Fixed, F10)", g_title, (long long)n, (long long)disp_fps, (long long)sim_fps, hfr_hz);
         } else
         snprintf(title, sizeof title, "%s - frame %lld - %lld fps", g_title, (long long)n, (long long)second_frames);
         SetWindowTextA(g_hwnd, title);
@@ -881,7 +1000,8 @@ static void lat_release(void) {
     latency_mode();
     if (g_lat_mode > 0 && !g_lockstep) {
         LONG64 n = g_vsync_n, t = g_tick_at[n & 15];
-        double per = g_lock_k ? (double)g_lock_k * g_vb_period : (double)g_freq.QuadPart / 60.0;
+        int hz = display_hfr_hz();
+        double per = hz > 60 ? (double)g_freq.QuadPart / (double)hz : (g_lock_k ? (double)g_lock_k * g_vb_period : (double)g_freq.QuadPart / 60.0);
         g_lat_last_d = 0;
         if (g_lat_backoff > 0) InterlockedDecrement(&g_lat_backoff);
         else if (t && n == g_latch && g_lat_ri >= 256) {
@@ -947,6 +1067,7 @@ void nvn_front_post_present_flush(void);               /* nvn_gl.c: the kept pre
 int display_present_defer(void) {
     { static DWORD tid; if (tid != GetCurrentThreadId()) { tid = GetCurrentThreadId(); display_perf_thread(); } }      /* the render thread: performance cores */
     LONG64 tgt = InterlockedExchange64(&g_hold_target, 0);
+    if (display_hfr_mode() > 0) { l1_ready(0); return 0; }
     l1_ready(tgt);
     if (!tgt || g_vsync_n >= tgt) return 0;
     InterlockedExchange64(&g_defer_target, tgt);
@@ -1017,7 +1138,7 @@ void display_present_done(int fight) {
 /* New pacing, part 2: holds the caller until the refresh that shows the last queued frame. Returns 1 if it waited. */
 int display_wait_refresh(void) {
     if (old_pacing() || !InterlockedExchange(&g_latch_pending, 0)) return 0;
-    if (g_vsync_n >= g_latch) return 0;
+    if (g_vsync_n >= g_latch) { display_hfr_step_sync(); return 0; }
     if (g_lockstep) {                                              /* SSBU_SPEED: see the comment at g_speed */
         static LONG64 due;                                         /* wall-clock time of the next refresh (QPC ticks) */
         LARGE_INTEGER a, now;
@@ -1084,6 +1205,7 @@ int display_wait_refresh(void) {
         }
     }
     lat_release();                                         /* L1: latency = low / lowest; the release time */
+    display_hfr_step_sync();                               /* HFR fixed cadence: step simulation at 60.000 Hz, sub-frame render on intermediate ticks */
     hitch_pacing(0);
     QueryPerformanceCounter(&b);
     nvn_pf_pace(b.QuadPart - a.QuadPart);

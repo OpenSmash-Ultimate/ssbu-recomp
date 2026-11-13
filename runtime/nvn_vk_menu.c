@@ -11,7 +11,7 @@
 #include "menu.h"
 #include "menu_spv.h"
 
-#define MU_RING (NSLOT + 1)
+#define MU_RING 8
 #define vkQueueWaitIdle_() vkDeviceWaitIdle(V.device)      /* rare: a buffer grows, the format changes, the test picture is read */
 static struct {
     int failed;
@@ -24,8 +24,38 @@ static struct {
     LONG64 frames;
 } g_mu;
 
+static struct {
+    VkImage img[2];
+    VMem mem[2];
+    VkImageView view[2];
+    VkDescriptorSet set[2];
+    VkSampler sampler;
+    int init[2];
+    int w, h, cur, ready;
+    VkFormat fmt;
+    int d4[4];
+    LONG64 t_prev, t_cur, t_last_present;
+    volatile LONG64 frames;
+    float last_alpha;
+    VkBuffer vb[MU_RING], ib;
+    VMem vbm[MU_RING], ibm;
+    int ring;
+    VkCommandBuffer cmd[4];
+    VkFence fence[4];
+    int pending[4], slot;
+} g_hfr;
+
+static void hfr_wait_all(void) {
+    for (int i = 0; i < 4; i++) if (g_hfr.pending[i] && g_hfr.fence[i]) {
+        vkWaitForFences(V.device, 1, &g_hfr.fence[i], VK_TRUE, 5000000000ull);
+        vkResetFences(V.device, 1, &g_hfr.fence[i]);
+        g_hfr.pending[i] = 0;
+    }
+}
+
 const char *nvn_vk_device_name(void) { return V.props.deviceName; }
 static void menu_vk_views_drop(void) {             /* nvn_vk.c swapchain_destroy: the device is idle, the swapchain is about to go */
+    hfr_wait_all();
     for (int i = 0; i < 16; i++) if (g_mu.views[i]) { vkDestroyImageView(V.device, g_mu.views[i], NULL); g_mu.views[i] = NULL; }
     g_mu.views_sc = NULL;
 }
@@ -48,9 +78,9 @@ static void mu_pipeline(VkFormat fmt) {
         VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         li.setLayoutCount = 1; li.pSetLayouts = &g_mu.dsl; li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pc;
         VKC(vkCreatePipelineLayout(V.device, &li, NULL, &g_mu.layout));
-        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
         VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        pi.maxSets = 1; pi.poolSizeCount = 1; pi.pPoolSizes = &ps;
+        pi.maxSets = 4; pi.poolSizeCount = 1; pi.pPoolSizes = &ps;
         VKC(vkCreateDescriptorPool(V.device, &pi, NULL, &g_mu.dpool));
         VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = g_mu.dpool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g_mu.dsl;
@@ -228,4 +258,130 @@ static void menu_vk_draw(uint32_t index) {
         }
     }
     g_mu.frames++;
+}
+
+static void hfr_ensure(int w, int h, VkFormat fmt) {
+    if (w <= 0 || h <= 0) return;
+    mu_pipeline(fmt);
+    if (!g_hfr.sampler) {
+        VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.25f;
+        VKC(vkCreateSampler(V.device, &si, NULL, &g_hfr.sampler));
+    }
+    if (!g_hfr.ib) {
+        static const uint16_t k_idx[6] = {0, 1, 2, 0, 2, 3};
+        g_hfr.ib = vbuf_new(64, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &g_hfr.ibm);
+        memcpy(g_hfr.ibm.map, k_idx, sizeof k_idx);
+        for (int i = 0; i < MU_RING; i++) g_hfr.vb[i] = vbuf_new(256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &g_hfr.vbm[i]);
+    }
+    if (!g_hfr.set[0]) {
+        VkDescriptorSetLayout dsls[2] = {g_mu.dsl, g_mu.dsl};
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = g_mu.dpool; ai.descriptorSetCount = 2; ai.pSetLayouts = dsls;
+        VKC(vkAllocateDescriptorSets(V.device, &ai, g_hfr.set));
+    }
+    if (g_hfr.w == w && g_hfr.h == h && g_hfr.fmt == fmt && g_hfr.img[0] && g_hfr.img[1]) return;
+    vkQueueWaitIdle_();
+    for (int i = 0; i < 2; i++) {
+        if (g_hfr.view[i]) { vkDestroyImageView(V.device, g_hfr.view[i], NULL); g_hfr.view[i] = NULL; }
+        if (g_hfr.img[i]) { vkDestroyImage(V.device, g_hfr.img[i], NULL); vmem_free(g_hfr.mem[i]); g_hfr.img[i] = NULL; }
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkMemoryRequirements rq;
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt;
+        ci.extent.width = (uint32_t)w; ci.extent.height = (uint32_t)h; ci.extent.depth = 1;
+        ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VKC(vkCreateImage(V.device, &ci, NULL, &g_hfr.img[i]));
+        vkGetImageMemoryRequirements(V.device, g_hfr.img[i], &rq);
+        g_hfr.mem[i] = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        VKC(vkBindImageMemory(V.device, g_hfr.img[i], g_hfr.mem[i].mem, g_hfr.mem[i].off));
+        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = g_hfr.img[i]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; vi.subresourceRange.levelCount = 1; vi.subresourceRange.layerCount = 1;
+        VKC(vkCreateImageView(V.device, &vi, NULL, &g_hfr.view[i]));
+        VkDescriptorImageInfo ii = {g_hfr.sampler, g_hfr.view[i], VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = g_hfr.set[i]; wr.descriptorCount = 1; wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(V.device, 1, &wr, 0, NULL);
+        g_hfr.init[i] = 0;
+    }
+    g_hfr.w = w; g_hfr.h = h; g_hfr.fmt = fmt; g_hfr.ready = 0;
+    printf("nvn_vk_hfr: 144 Hz+ frame history textures %dx%d (format %d) allocated\n", w, h, (int)fmt);
+    fflush(stdout);
+}
+
+static void hfr_capture(VTex *src, const int s4[4], const int d4[4]) {
+    if (!src || d4[2] <= 0 || d4[3] <= 0) return;
+    hfr_ensure(d4[2], d4[3], V.format.format);
+    int c = g_hfr.cur ^= 1;
+    for (int pass = 0; pass < 2; pass++) {
+        int dst = pass == 0 ? c : (c ^ 1);
+        if (pass == 1 && g_hfr.init[dst]) break;
+        image_barrier(g_hfr.img[dst], VK_IMAGE_ASPECT_COLOR_BIT, g_hfr.init[dst] ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit b;
+        memset(&b, 0, sizeof b);
+        b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
+        b.srcOffsets[0].x = s4[0]; b.srcOffsets[0].y = s4[1]; b.srcOffsets[1].x = s4[0] + s4[2]; b.srcOffsets[1].y = s4[1] + s4[3]; b.srcOffsets[1].z = 1;
+        b.dstOffsets[1].x = g_hfr.w; b.dstOffsets[1].y = g_hfr.h; b.dstOffsets[1].z = 1;
+        vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_hfr.img[dst], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+        image_barrier(g_hfr.img[dst], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        g_hfr.init[dst] = 1;
+    }
+    g_hfr.t_prev = g_hfr.t_cur;
+    g_hfr.t_cur = tk();
+    g_hfr.last_alpha = 0.0f;
+    memcpy(g_hfr.d4, d4, sizeof g_hfr.d4);
+    g_hfr.ready = 1;
+}
+
+static void hfr_blit_or_blend(uint32_t index, const int d4[4], float alpha) {
+    int cur = g_hfr.cur, prev = cur ^ 1;
+    int base = alpha >= 0.99f ? cur : prev;
+    VkImageBlit b;
+    memset(&b, 0, sizeof b);
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
+    b.srcOffsets[1].x = g_hfr.w; b.srcOffsets[1].y = g_hfr.h; b.srcOffsets[1].z = 1;
+    b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
+    vkCmdBlitImage(R.cmd, g_hfr.img[base], VK_IMAGE_LAYOUT_GENERAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+    if (alpha <= 0.01f || alpha >= 0.99f) return;
+    VkImageView view = mu_view(index);
+    if (!view || !g_mu.pipe) return;
+    int W = (int)V.extent.width, H = (int)V.extent.height;
+    int r = g_hfr.ring = (g_hfr.ring + 1) % MU_RING;
+    uint32_t a8 = (uint32_t)(alpha * 255.0f + 0.5f);
+    if (a8 > 255) a8 = 255;
+    uint32_t col = 0x00FFFFFFu | (a8 << 24);
+    float x0 = (float)d4[0], y0 = (float)d4[1], x1 = (float)(d4[0] + d4[2]), y1 = (float)(d4[1] + d4[3]);
+    struct { float x, y, u, v; uint32_t c; } vtx[4] = {
+        {x0, y0, 0.0f, 0.0f, col},
+        {x1, y0, 1.0f, 0.0f, col},
+        {x1, y1, 1.0f, 1.0f, col},
+        {x0, y1, 0.0f, 1.0f, col}
+    };
+    memcpy(g_hfr.vbm[r].map, vtx, sizeof vtx);
+    image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ca.imageView = view; ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea.extent = V.extent; ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &ca;
+    vkCmdBeginRendering(R.cmd, &ri);
+    vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mu.pipe);
+    vkCmdBindDescriptorSets(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_mu.layout, 0, 1, &g_hfr.set[cur], 0, NULL);
+    VkDeviceSize zero = 0;
+    vkCmdBindVertexBuffers(R.cmd, 0, 1, &g_hfr.vb[r], &zero);
+    vkCmdBindIndexBuffer(R.cmd, g_hfr.ib, 0, VK_INDEX_TYPE_UINT16);
+    VkViewport vp = {0, 0, (float)W, (float)H, 0, 1};
+    vkCmdSetViewport(R.cmd, 0, 1, &vp);
+    VkRect2D sc = {{(int32_t)d4[0], (int32_t)d4[1]}, {(uint32_t)d4[2], (uint32_t)d4[3]}};
+    vkCmdSetScissor(R.cmd, 0, 1, &sc);
+    float pc[5] = {2.0f / (float)W, 2.0f / (float)H, -1.0f, -1.0f, 0.0f};
+    vkCmdPushConstants(R.cmd, g_mu.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof pc, pc);
+    vkCmdDrawIndexed(R.cmd, 6, 1, 0, 0, 0);
+    vkCmdEndRendering(R.cmd);
+    image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    R.pipe_bound = NULL; R.dyn_dirty = R.vi_dirty = 1; R.dyn3_dirty = 1;
 }

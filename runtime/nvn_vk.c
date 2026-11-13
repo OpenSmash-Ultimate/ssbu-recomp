@@ -53,6 +53,7 @@ void nvn_render_run(void (*fn)(void *), void *arg);       /* nvn_gl.c: run on th
 void display_pace(void);                                  /* display.c */
 int display_wait_refresh(void);
 void display_before_present(void);
+int display_hfr_mode(void);
 
 /* ---------------------------------------------------------------- the loader's functions */
 #ifdef _WIN32
@@ -469,7 +470,7 @@ int nvn_vk_init(void *hwnd) {
     static const char *const k_mode[4] = {"immediate", "mailbox", "fifo", "fifo_relaxed"};
     const char *want = getenv("SSBU_VK_PRESENT");
     V.mode = have[VK_PRESENT_MODE_MAILBOX_KHR] ? VK_PRESENT_MODE_MAILBOX_KHR : have[VK_PRESENT_MODE_IMMEDIATE_KHR] ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
-    if (!want && gfx_options()->present && gfx_options()->present < 4) {      /* 4 display, 5 auto: mailbox, the tick comes from display.c (session 14) */       /* track O: vsync = on | off | mailbox in graphics.ini (the environment switch wins) */
+    if (!want && gfx_options()->present && gfx_options()->present < 4 && !(gfx_options()->present == 1 && display_hfr_mode() > 0)) {      /* 4 display, 5 auto: mailbox, the tick comes from display.c (session 14) */       /* track O: vsync = on | off | mailbox in graphics.ini (the environment switch wins); when HFR fixed cadence is active, bypass FIFO VSync so display.c paces at 144 Hz without double-waiting */
         static const char *const k_opt[4] = {NULL, "fifo", "immediate", "mailbox"};
         want = k_opt[gfx_options()->present & 3];
         printf("nvn_vk: graphics.ini vsync = %s: present mode %s asked for\n", gfx_options()->present == 1 ? "on" : gfx_options()->present == 2 ? "off" : "mailbox", want);

@@ -3520,7 +3520,8 @@ int osk_active(void); int osk_take(uint32_t *dst, LONG *seen); void osk_size(int
 static struct { VkImage img; VMem mem; VkFormat fmt; int made, w, h, cur; LONG seen; VkBuffer buf[3]; VMem bmem[3]; } g_osk;
 static PresentJob g_osk_job;                       /* the last real present: shown again under the keyboard */
 static int g_osk_job_ok;
-long long nvn_vk_presents(void) { return (long long)g_vk_frames; }
+static LONG64 hfr_frames_count(void);
+long long nvn_vk_presents(void) { return (long long)(g_vk_frames + hfr_frames_count()); }
 static void vk_present2(void *arg, int progress);
 void nvn_vk_osk_redraw_job(void *arg) { (void)arg; if (V.alive && g_osk_job_ok) vk_present2(&g_osk_job, 1); }
 static void osk_draw(uint32_t index) {
@@ -3636,6 +3637,103 @@ static void present_flush(void) {
 }
 void nvn_vk_present_flush_job(void *arg) { (void)arg; if (V.alive) present_flush(); }
 #include "nvn_vk_menu.c"                          /* U1: the settings menu over the picture (menu.cpp builds it) */
+static LONG64 hfr_frames_count(void) { return g_hfr.frames; }
+int display_hfr_mode(void);
+void display_hfr_job_begin(void);
+void display_hfr_present_done(void);
+double display_vblank_period_qpc(void);
+double display_hfr_alpha(LONG64 t_prev, LONG64 t_cur);
+void nvn_vk_hfr_present_job(void *arg) {
+    (void)arg;
+    display_hfr_job_begin();
+    if (!V.alive || g_pend.on || !g_hfr.ready || g_ovl.screen || display_hfr_mode() <= 0) return;
+    if (g_pend.recreate || !V.swapchain) {
+        g_pend.recreate = 0;
+        cmd_wait_all();
+        if (V.swapchain) swapchain_destroy();
+        InterlockedIncrement64(&g_vk_recreated);
+        if (!swapchain_create()) return;
+    }
+    double per_qpc = display_vblank_period_qpc();
+    if (tk() - g_hfr.t_last_present < (LONG64)(per_qpc * 0.25)) return;
+    int next_sem = (g_isem + 1) % 8;
+    if (!g_sem[next_sem][0]) {
+        VkSemaphoreCreateInfo smi = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        VKC(vkCreateSemaphore(V.device, &smi, NULL, &g_sem[next_sem][0]));
+        VKC(vkCreateSemaphore(V.device, &smi, NULL, &g_sem[next_sem][1]));
+    }
+    VkSemaphore acq = g_sem[next_sem][0], rend = g_sem[next_sem][1];
+    uint32_t index = 0;
+    VkResult r = vkAcquireNextImageKHR(V.device, V.swapchain, 1000000000ull, acq, NULL, &index);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { g_pend.recreate = 1; return; }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return;
+    g_isem = next_sem;
+    int suboptimal = r == VK_SUBOPTIMAL_KHR;
+    if (index < 16) {
+        if (!g_sem_img[index]) { VkSemaphoreCreateInfo smi2 = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKC(vkCreateSemaphore(V.device, &smi2, NULL, &g_sem_img[index])); }
+        rend = g_sem_img[index];
+    }
+    int sl = g_hfr.slot = (g_hfr.slot + 1) & 3;
+    if (!g_hfr.cmd[sl]) {
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = V.pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+        VKC(vkAllocateCommandBuffers(V.device, &ai, &g_hfr.cmd[sl]));
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VKC(vkCreateFence(V.device, &fi, NULL, &g_hfr.fence[sl]));
+    }
+    if (g_hfr.pending[sl]) {
+        vkWaitForFences(V.device, 1, &g_hfr.fence[sl], VK_TRUE, 5000000000ull);
+        vkResetFences(V.device, 1, &g_hfr.fence[sl]);
+        g_hfr.pending[sl] = 0;
+    }
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VKC(vkResetCommandBuffer(g_hfr.cmd[sl], 0));
+    VKC(vkBeginCommandBuffer(g_hfr.cmd[sl], &bi));
+    VkCommandBuffer prev_cmd = R.cmd;
+    R.cmd = g_hfr.cmd[sl];
+    VkImageSubresourceRange sr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    void display_fit(int sw, int sh, int dw, int dh, int out[4]);
+    int d4[4];
+    display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+    if (d4[2] != (int)V.extent.width || d4[3] != (int)V.extent.height) {
+        VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f;
+        vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr);
+        VkImageMemoryBarrier ib; memset(&ib, 0, sizeof ib);
+        ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; ib.srcAccessMask = ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        ib.oldLayout = ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.image = V.images[index]; ib.subresourceRange = sr;
+        vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    }
+    float alpha = (float)display_hfr_alpha(g_hfr.t_prev, g_hfr.t_cur);
+    if (alpha < g_hfr.last_alpha) alpha = g_hfr.last_alpha;
+    g_hfr.last_alpha = alpha;
+    hfr_blit_or_blend(index, d4, alpha);
+    overlay_draw(index);
+    image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    VKC(vkEndCommandBuffer(g_hfr.cmd[sl]));
+    R.cmd = prev_cmd;
+    VkFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo sb = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    sb.waitSemaphoreCount = 1; sb.pWaitSemaphores = &acq; sb.pWaitDstStageMask = &stage;
+    sb.signalSemaphoreCount = 1; sb.pSignalSemaphores = &rend;
+    sb.commandBufferCount = 1; sb.pCommandBuffers = &g_hfr.cmd[sl];
+    VKC(vkQueueSubmit(V.queue, 1, &sb, g_hfr.fence[sl]));
+    g_hfr.pending[sl] = 1;
+    VkPresentInfoKHR pr = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pr.waitSemaphoreCount = 1; pr.pWaitSemaphores = &rend; pr.swapchainCount = 1; pr.pSwapchains = &V.swapchain; pr.pImageIndices = &index;
+    r = vkQueuePresentKHR(V.queue, &pr);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || suboptimal) g_pend.recreate = 1;
+    else vk_ok("vkQueuePresentKHR", r);
+    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+        LONG64 nowt = tk();
+        g_hfr.t_last_present = nowt;
+        g_wd_beat = nowt;
+        InterlockedIncrement64(&g_hfr.frames);
+        display_hfr_present_done();
+    }
+}
 #include "nvn_vk_flash.c"                         /* session 13: the white-flash detector (fl_pass, fl_capture, fl_shutdown) */
 /* nvn_vk_m4.c m4_barrier, render thread, g_sh_lock NOT held: the held loading screen once more, with the bar at `frac` */
 static void present_progress(float frac) { if (!g_ovl.bar_arg) return; g_ovl.frac = frac; g_ovl.thick = 8; vk_present2(g_ovl.bar_arg, 1); g_ovl.thick = 0; }
@@ -3810,6 +3908,47 @@ swap: ;
     present_flush();
     tp[2] = tk();                               /* session 14: a present still kept for its tick goes out before the next one is made */
     if (g_pend.recreate) { g_pend.recreate = 0; cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); }
+    if (!V.swapchain) swapchain_create();
+    if (!progress && display_hfr_mode() > 0 && !g_ovl.screen && V.swapchain) {
+        if (vt && vt->samples == 1) {
+            int s4[4] = {0, 0, vt->w, vt->h};
+            if (j->win->crop[2] > 0 && j->win->crop[3] > 0) memcpy(s4, j->win->crop, sizeof s4);
+            if (vt->rs && j->win->crop[2] > 0 && j->win->crop[3] > 0) {
+                int x1 = rs_edge(s4[0] + s4[2], vt->sx, vt->w), y1 = rs_edge(s4[1] + s4[3], vt->sy, vt->h);
+                s4[0] = rs_edge(s4[0], vt->sx, vt->w); s4[1] = rs_edge(s4[1], vt->sy, vt->h); s4[2] = x1 - s4[0]; s4[3] = y1 - s4[1];
+            }
+            void display_fit(int sw, int sh, int dw, int dh, int out[4]);
+            int d4[4];
+            display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+            VTex *src = vt;
+            if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, d4[2], d4[3]);
+            cmd_begin();
+            vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cmd_begin();
+            hfr_capture(src, s4, d4);
+            cmd_submit(NULL, NULL);
+        } else {
+            cmd_submit(NULL, NULL);
+        }
+        g_wd_where = 0;
+        tp[5] = tk();
+        g_tm[4] += tp[5] - t_present;
+        nvn_front_frame_end(R.frame_draws, R.frame_skipped, R.frame_clears);
+        tp[6] = tk();
+        { static LONG64 disp_prev; g_in_fight = R.dispatches != disp_prev; disp_prev = R.dispatches; if (g_in_fight) { g_fight_last = frame; if (g_prep_state == 1) g_prep_fight_frames++; } }
+        {   static LONG64 t_prev;
+            LONG64 t_now = tk();
+            int battle = g_in_fight && R.frame_draws > 120;
+            if (battle) g_battle_frames++;
+            if (frame >= 0 && frame < FRSTAT_N) {
+                LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+                g_fr_fight[frame] = (uint8_t)battle;
+                g_fr_wall[frame] = t_prev ? (float)((double)(t_now - t_prev) * 1000.0 / (double)fq.QuadPart) : 0.0f;
+            }
+            t_prev = t_now;
+        }
+        return;
+    }
     /* an extra present of a held loading screen: everything submitted so far is waited for first, so that the semaphore pair
      * taken below has no pending operation (validation run s11v2: VUID-vkAcquireNextImageKHR-semaphore-01779, three times,
      * all at such presents: with one submission a present the pair came round before its command buffer had been waited for) */
